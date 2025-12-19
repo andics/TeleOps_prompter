@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+venv/
+env/
+ENV/
+
+# Conda
+.conda/
+
+# Package files
+*.egg-info/
+dist/
+build/
+
+# Flask
+instance/
+.webassets-cache
+
+# Environment variables
+.env
+
+# Captured frames
+exp_time_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak

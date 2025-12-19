@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Feed Monitor - AI Vision Filters</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>Camera Feed Monitor</h1>
+            <div class="theme-toggle">
+                <button id="themeToggle" class="theme-toggle-btn" aria-label="Toggle theme">
+                    <svg class="sun-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"></circle>
+                        <line x1="12" y1="1" x2="12" y2="3"></line>
+                        <line x1="12" y1="21" x2="12" y2="23"></line>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                        <line x1="1" y1="12" x2="3" y2="12"></line>
+                        <line x1="21" y1="12" x2="23" y2="12"></line>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                    </svg>
+                    <svg class="moon-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Left Column: Latest Frame -->
+            <section class="frame-panel">
+                <div class="panel-header">
+                    <h2>Latest Frame</h2>
+                    <span class="status-indicator" id="frameStatus">●</span>
+                </div>
+                <div class="frame-container">
+                    <img id="latestFrame" src="" alt="Latest camera frame" />
+                    <div class="frame-placeholder">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                            <polyline points="21 15 16 10 5 21"></polyline>
+                        </svg>
+                        <p>Waiting for camera feed...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Middle Column: Filters -->
+            <section class="filters-panel">
+                <div class="panel-header">
+                    <h2>Vision Filters</h2>
+                </div>
+                
+                <!-- Add Filter Form -->
+                <div class="add-filter-form">
+                    <textarea 
+                        id="newFilterPrompt" 
+                        placeholder="Enter a filter prompt, e.g., 'Is there a cap on the bottle in this photo? Respond only True for Yes and False for No.'"
+                        rows="3"
+                    ></textarea>
+                    <button id="addFilterBtn" class="btn btn-primary">Add Filter</button>
+                </div>
+
+                <!-- Filter List -->
+                <div id="filtersList" class="filters-list">
+                    <!-- Filters will be dynamically added here -->
+                </div>
+            </section>
+
+            <!-- Right Column: Chat -->
+            <section class="chat-panel">
+                <div class="panel-header">
+                    <h2>Chat</h2>
+                </div>
+                <div class="chat-container">
+                    <div id="chatMessages" class="chat-messages">
+                        <div class="chat-message system-message">
+                            <p>Welcome! Add filters to monitor your camera feed with AI vision analysis.</p>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <textarea 
+                            id="chatInput" 
+                            placeholder="Type a message..."
+                            rows="2"
+                        ></textarea>
+                        <button id="sendChatBtn" class="btn btn-primary">Send</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+
