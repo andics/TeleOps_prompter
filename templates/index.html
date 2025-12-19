@@ -3,17 +3,36 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Camera Feed Monitor - AI Vision Filters</title>
+    <title>TeleOps - AI Vision Monitor</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
+    <div class="app-container">
+        <!-- Animated Background -->
+        <div class="bg-gradient"></div>
+        <div class="bg-grid"></div>
+        
         <!-- Header -->
         <header class="header">
-            <h1>Camera Feed Monitor</h1>
-            <div class="theme-toggle">
-                <button id="themeToggle" class="theme-toggle-btn" aria-label="Toggle theme">
-                    <svg class="sun-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <div class="header-left">
+                <div class="logo">
+                    <svg class="logo-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                    </svg>
+                    <h1>Tele<span class="accent">Ops</span></h1>
+                </div>
+                <div class="status-badge" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Live</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <button id="themeToggle" class="icon-btn" aria-label="Toggle theme">
+                    <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="5"></circle>
                         <line x1="12" y1="1" x2="12" y2="3"></line>
                         <line x1="12" y1="21" x2="12" y2="23"></line>
@@ -24,7 +43,7 @@
                         <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
                         <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
                     </svg>
-                    <svg class="moon-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
                     </svg>
                 </button>
@@ -33,39 +52,73 @@
 
         <!-- Main Content -->
         <main class="main-content">
-            <!-- Left Column: Latest Frame -->
-            <section class="frame-panel">
+            <!-- Left Column: Camera Feed -->
+            <section class="panel camera-panel">
                 <div class="panel-header">
-                    <h2>Latest Frame</h2>
-                    <span class="status-indicator" id="frameStatus">●</span>
+                    <div class="panel-title">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                            <circle cx="12" cy="13" r="4"></circle>
+                        </svg>
+                        <h2>Live Feed</h2>
+                    </div>
+                    <div class="panel-badge" id="frameStatus">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="12" r="8"></circle>
+                        </svg>
+                        <span>Recording</span>
+                    </div>
                 </div>
                 <div class="frame-container">
                     <img id="latestFrame" src="" alt="Latest camera frame" />
                     <div class="frame-placeholder">
-                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                            <polyline points="21 15 16 10 5 21"></polyline>
-                        </svg>
-                        <p>Waiting for camera feed...</p>
+                        <div class="placeholder-icon">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                <polyline points="21 15 16 10 5 21"></polyline>
+                            </svg>
+                        </div>
+                        <p>Connecting to camera...</p>
+                        <div class="loading-dots">
+                            <span></span><span></span><span></span>
+                        </div>
                     </div>
                 </div>
             </section>
 
             <!-- Middle Column: Filters -->
-            <section class="filters-panel">
+            <section class="panel filters-panel">
                 <div class="panel-header">
-                    <h2>Vision Filters</h2>
+                    <div class="panel-title">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                        </svg>
+                        <h2>AI Filters</h2>
+                    </div>
+                    <span class="filter-count" id="filterCount">0 active</span>
                 </div>
                 
                 <!-- Add Filter Form -->
                 <div class="add-filter-form">
-                    <textarea 
-                        id="newFilterPrompt" 
-                        placeholder="Enter a filter prompt, e.g., 'Is there a cap on the bottle in this photo? Respond only True for Yes and False for No.'"
-                        rows="3"
-                    ></textarea>
-                    <button id="addFilterBtn" class="btn btn-primary">Add Filter</button>
+                    <div class="input-group">
+                        <svg class="input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <textarea 
+                            id="newFilterPrompt" 
+                            placeholder="Ask AI anything about the image..."
+                            rows="2"
+                        ></textarea>
+                    </div>
+                    <button id="addFilterBtn" class="btn btn-primary">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        Add Filter
+                    </button>
                 </div>
 
                 <!-- Filter List -->
@@ -74,31 +127,44 @@
                 </div>
             </section>
 
-            <!-- Right Column: Chat -->
-            <section class="chat-panel">
+            <!-- Right Column: Activity Log -->
+            <section class="panel log-panel">
                 <div class="panel-header">
-                    <h2>Chat</h2>
+                    <div class="panel-title">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                            <polyline points="10 9 9 9 8 9"></polyline>
+                        </svg>
+                        <h2>Activity Log</h2>
+                    </div>
+                    <button id="clearLogBtn" class="icon-btn-small" title="Clear log">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
                 </div>
-                <div class="chat-container">
-                    <div id="chatMessages" class="chat-messages">
-                        <div class="chat-message system-message">
-                            <p>Welcome! Add filters to monitor your camera feed with AI vision analysis.</p>
-                        </div>
-                    </div>
-                    <div class="chat-input-container">
-                        <textarea 
-                            id="chatInput" 
-                            placeholder="Type a message..."
-                            rows="2"
-                        ></textarea>
-                        <button id="sendChatBtn" class="btn btn-primary">Send</button>
-                    </div>
+                <div id="logContainer" class="log-container">
+                    <!-- Logs will be dynamically added here -->
                 </div>
             </section>
         </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-info">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+                <span id="updateInfo">Updating every 3s</span>
+            </div>
+        </footer>
     </div>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
-

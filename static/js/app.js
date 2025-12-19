@@ -1,21 +1,21 @@
 /**
- * Main Application JavaScript
- * Handles UI interactions, theme toggling, and API communication
- * 
- * IMPORTANT: This script uses CAPTURE_INTERVAL from the server config
- * to determine how often to poll for updates.
+ * TeleOps - AI Vision Monitor
+ * Real-time camera feed with AI filter evaluation
  */
 
 // ==================== State Management ====================
 const state = {
-    theme: localStorage.getItem('theme') || 'light',
+    theme: localStorage.getItem('theme') || 'dark',
     filters: [],
+    logs: [],
     latestFrame: null,
     frameUpdateInterval: null,
     filterUpdateInterval: null,
-    captureInterval: 3000,  // Default 3 seconds, will be updated from server
+    logUpdateInterval: null,
+    captureInterval: 3000,
     lastFrameTimestamp: null,
-    lastFiltersJSON: null
+    lastFiltersJSON: null,
+    lastLogsLength: 0
 };
 
 // ==================== Theme Management ====================
@@ -33,17 +33,19 @@ function initTheme() {
 // ==================== Config Loading ====================
 async function loadConfig() {
     try {
-        console.log('[UI] Loading config from server...');
         const response = await fetch('/api/config');
         const data = await response.json();
         
         if (data.success && data.capture_interval) {
-            // Convert seconds to milliseconds
             state.captureInterval = data.capture_interval * 1000;
-            console.log(`[UI] CAPTURE_INTERVAL from server: ${data.capture_interval} seconds (${state.captureInterval}ms)`);
+            
+            const updateInfo = document.getElementById('updateInfo');
+            if (updateInfo) {
+                updateInfo.textContent = `Updating every ${data.capture_interval}s`;
+            }
         }
     } catch (error) {
-        console.error('[UI] Error loading config, using default:', error);
+        console.error('[TeleOps] Error loading config:', error);
     }
     
     return state.captureInterval;
@@ -60,24 +62,87 @@ async function updateLatestFrame() {
             const framePlaceholder = document.querySelector('.frame-placeholder');
             const frameStatus = document.getElementById('frameStatus');
             
-            // Only update if image has changed (check timestamp)
             if (data.timestamp !== state.lastFrameTimestamp) {
                 frameImg.src = data.image;
                 frameImg.classList.add('loaded');
-                framePlaceholder.style.display = 'none';
-                frameStatus.classList.add('active');
+                if (framePlaceholder) framePlaceholder.style.display = 'none';
+                if (frameStatus) frameStatus.classList.add('active');
                 
                 state.latestFrame = data.path;
                 state.lastFrameTimestamp = data.timestamp;
-                
-                // Update frame info display
-                const frameTime = new Date(data.timestamp * 1000);
-                console.log(`[UI] Frame updated: ${frameTime.toLocaleTimeString()}`);
             }
         }
     } catch (error) {
-        console.error('[UI] Error fetching latest frame:', error);
+        console.error('[TeleOps] Error fetching frame:', error);
     }
+}
+
+// ==================== Log Management ====================
+async function loadLogs() {
+    try {
+        const response = await fetch('/api/logs');
+        const data = await response.json();
+        
+        if (data.success && data.logs) {
+            // Only update if new logs exist
+            if (data.logs.length !== state.lastLogsLength) {
+                state.logs = data.logs;
+                state.lastLogsLength = data.logs.length;
+                renderLogs();
+            }
+        }
+    } catch (error) {
+        console.error('[TeleOps] Error loading logs:', error);
+    }
+}
+
+function renderLogs() {
+    const logContainer = document.getElementById('logContainer');
+    
+    if (state.logs.length === 0) {
+        logContainer.innerHTML = `
+            <div style="text-align: center; padding: 2rem; color: var(--text-muted);">
+                <p>No activity yet...</p>
+            </div>
+        `;
+        return;
+    }
+    
+    // Show newest first
+    const reversedLogs = [...state.logs].reverse();
+    
+    logContainer.innerHTML = reversedLogs.map(log => createLogEntryHTML(log)).join('');
+    
+    // Auto-scroll to top (newest)
+    logContainer.scrollTop = 0;
+}
+
+function createLogEntryHTML(log) {
+    const typeLabels = {
+        info: 'INFO',
+        success: 'OK',
+        error: 'ERR',
+        warning: 'WARN',
+        vlm: 'VLM',
+        camera: 'CAM',
+        filter: 'FILTER'
+    };
+    
+    const label = typeLabels[log.type] || 'LOG';
+    
+    return `
+        <div class="log-entry ${log.type}">
+            <span class="log-timestamp">${log.timestamp}</span>
+            <span class="log-badge">${label}</span>
+            <span class="log-message">${escapeHtml(log.message)}</span>
+        </div>
+    `;
+}
+
+function clearLogs() {
+    state.logs = [];
+    state.lastLogsLength = 0;
+    renderLogs();
 }
 
 // ==================== Filter Management ====================
@@ -87,17 +152,24 @@ async function loadFilters() {
         const data = await response.json();
         
         if (data.success) {
-            // Check if filters have actually changed to avoid unnecessary re-renders
             const newFiltersJSON = JSON.stringify(data.filters);
             if (newFiltersJSON !== state.lastFiltersJSON) {
                 state.filters = data.filters;
                 state.lastFiltersJSON = newFiltersJSON;
                 renderFilters();
-                console.log(`[UI] Filters updated: ${data.filters.length} filters`);
+                updateFilterCount();
             }
         }
     } catch (error) {
-        console.error('[UI] Error loading filters:', error);
+        console.error('[TeleOps] Error loading filters:', error);
+    }
+}
+
+function updateFilterCount() {
+    const activeCount = state.filters.filter(f => f.is_active).length;
+    const countEl = document.getElementById('filterCount');
+    if (countEl) {
+        countEl.textContent = `${activeCount} active`;
     }
 }
 
@@ -106,43 +178,49 @@ function renderFilters() {
     
     if (state.filters.length === 0) {
         filtersList.innerHTML = `
-            <div class="filter-placeholder" style="text-align: center; padding: 2rem; color: var(--text-muted);">
-                <p>No filters yet. Add a filter above to get started!</p>
+            <div class="empty-state" style="text-align: center; padding: 2rem;">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color: var(--text-muted); margin-bottom: 0.75rem;">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                </svg>
+                <p style="color: var(--text-muted); font-size: 0.85rem;">
+                    No filters yet.<br>Add one above to start analyzing!
+                </p>
             </div>
         `;
         return;
     }
     
     filtersList.innerHTML = state.filters.map(filter => createFilterHTML(filter)).join('');
-    
-    // Add event listeners
     attachFilterEventListeners();
 }
 
 function createFilterHTML(filter) {
     const activeClass = filter.is_active ? 'active' : '';
     
-    // Determine result display and styling
-    let resultText = 'Waiting for evaluation...';
+    let resultText = 'Waiting for analysis...';
     let resultClass = '';
-    let statusClass = '';
+    let resultIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
     
     if (filter.status === 'evaluating') {
-        resultText = 'Evaluating...';
-        statusClass = 'evaluating';
+        resultText = 'Analyzing...';
+        resultClass = 'evaluating';
+        resultIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`;
     } else if (filter.result !== null && filter.result !== undefined) {
         resultText = filter.result;
-        
-        // Check if result indicates true/false for styling
         const resultLower = String(filter.result).toLowerCase();
-        if (resultLower.includes('true') || resultLower.includes('yes')) {
-            resultClass = 'result-true';
-        } else if (resultLower.includes('false') || resultLower.includes('no')) {
-            resultClass = 'result-false';
+        
+        if (resultLower === 'true' || resultLower.includes('yes')) {
+            resultClass = 'success';
+            resultIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`;
+        } else if (resultLower === 'false' || resultLower.includes('no')) {
+            resultClass = 'error';
+            resultIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`;
+        } else {
+            resultClass = 'success';
+            resultIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
         }
     }
     
-    // Format timestamp if available
     let timestampDisplay = '';
     if (filter.timestamp) {
         timestampDisplay = filter.timestamp;
@@ -152,41 +230,34 @@ function createFilterHTML(filter) {
         <div class="filter-block" data-filter-id="${filter.id}">
             <div class="filter-header">
                 <div class="filter-prompt">${escapeHtml(filter.prompt)}</div>
-                <div class="filter-status-switch ${activeClass}" 
+                <div class="filter-toggle ${activeClass}" 
                      data-action="toggle" 
                      data-filter-id="${filter.id}">
                 </div>
             </div>
             
-            <!-- GPT Response Box -->
-            <div class="filter-response-box ${resultClass} ${statusClass}">
-                <div class="response-label">GPT Response:</div>
-                <div class="response-text">${escapeHtml(resultText)}</div>
-                ${timestampDisplay ? `<div class="response-timestamp">${escapeHtml(timestampDisplay)}</div>` : ''}
+            <div class="result-box ${resultClass}">
+                <div class="result-label">
+                    ${resultIcon}
+                    <span>Result</span>
+                </div>
+                <div class="result-text">${escapeHtml(resultText)}</div>
+                ${timestampDisplay ? `<div class="result-timestamp">${escapeHtml(timestampDisplay)}</div>` : ''}
             </div>
             
             <div class="filter-controls">
-                <button class="filter-btn move-up" 
-                        data-action="move-up" 
-                        data-filter-id="${filter.id}"
-                        title="Move Up">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="filter-btn" data-action="move-up" data-filter-id="${filter.id}" title="Move Up">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="18 15 12 9 6 15"></polyline>
                     </svg>
                 </button>
-                <button class="filter-btn move-down" 
-                        data-action="move-down" 
-                        data-filter-id="${filter.id}"
-                        title="Move Down">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="filter-btn" data-action="move-down" data-filter-id="${filter.id}" title="Move Down">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="6 9 12 15 18 9"></polyline>
                     </svg>
                 </button>
-                <button class="filter-btn remove" 
-                        data-action="remove" 
-                        data-filter-id="${filter.id}"
-                        title="Remove">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="filter-btn remove" data-action="remove" data-filter-id="${filter.id}" title="Remove">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                     </svg>
@@ -197,7 +268,6 @@ function createFilterHTML(filter) {
 }
 
 function attachFilterEventListeners() {
-    // Toggle switches
     document.querySelectorAll('[data-action="toggle"]').forEach(el => {
         el.addEventListener('click', async (e) => {
             const filterId = e.currentTarget.dataset.filterId;
@@ -205,7 +275,6 @@ function attachFilterEventListeners() {
         });
     });
     
-    // Move up buttons
     document.querySelectorAll('[data-action="move-up"]').forEach(el => {
         el.addEventListener('click', async (e) => {
             const filterId = e.currentTarget.dataset.filterId;
@@ -213,7 +282,6 @@ function attachFilterEventListeners() {
         });
     });
     
-    // Move down buttons
     document.querySelectorAll('[data-action="move-down"]').forEach(el => {
         el.addEventListener('click', async (e) => {
             const filterId = e.currentTarget.dataset.filterId;
@@ -221,7 +289,6 @@ function attachFilterEventListeners() {
         });
     });
     
-    // Remove buttons
     document.querySelectorAll('[data-action="remove"]').forEach(el => {
         el.addEventListener('click', async (e) => {
             const filterId = e.currentTarget.dataset.filterId;
@@ -235,16 +302,14 @@ async function addFilter() {
     const prompt = promptInput.value.trim();
     
     if (!prompt) {
-        alert('Please enter a filter prompt');
+        promptInput.focus();
         return;
     }
     
     try {
         const response = await fetch('/api/filters', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt })
         });
         
@@ -252,116 +317,51 @@ async function addFilter() {
         
         if (data.success) {
             promptInput.value = '';
-            state.lastFiltersJSON = null; // Force refresh
+            state.lastFiltersJSON = null;
             await loadFilters();
-            addChatMessage(`Filter added: "${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}"`, 'system');
         }
     } catch (error) {
-        console.error('[UI] Error adding filter:', error);
-        alert('Failed to add filter');
+        console.error('[TeleOps] Error adding filter:', error);
     }
 }
 
 async function removeFilter(filterId) {
     try {
-        const response = await fetch(`/api/filters/${filterId}`, {
-            method: 'DELETE'
-        });
-        
-        if (response.ok) {
-            state.lastFiltersJSON = null; // Force refresh
-            await loadFilters();
-            addChatMessage('Filter removed', 'system');
-        }
+        await fetch(`/api/filters/${filterId}`, { method: 'DELETE' });
+        state.lastFiltersJSON = null;
+        await loadFilters();
     } catch (error) {
-        console.error('[UI] Error removing filter:', error);
+        console.error('[TeleOps] Error removing filter:', error);
     }
 }
 
 async function moveFilter(filterId, direction) {
     try {
-        const response = await fetch(`/api/filters/${filterId}/move`, {
+        await fetch(`/api/filters/${filterId}/move`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ direction })
         });
-        
-        if (response.ok) {
-            state.lastFiltersJSON = null; // Force refresh
-            await loadFilters();
-        }
+        state.lastFiltersJSON = null;
+        await loadFilters();
     } catch (error) {
-        console.error('[UI] Error moving filter:', error);
+        console.error('[TeleOps] Error moving filter:', error);
     }
 }
 
 async function toggleFilter(filterId) {
     try {
-        const response = await fetch(`/api/filters/${filterId}/toggle`, {
-            method: 'POST'
-        });
-        
-        if (response.ok) {
-            state.lastFiltersJSON = null; // Force refresh
-            await loadFilters();
-        }
+        await fetch(`/api/filters/${filterId}/toggle`, { method: 'POST' });
+        state.lastFiltersJSON = null;
+        await loadFilters();
     } catch (error) {
-        console.error('[UI] Error toggling filter:', error);
-    }
-}
-
-// ==================== Chat Management ====================
-function addChatMessage(message, type = 'user') {
-    const chatMessages = document.getElementById('chatMessages');
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `chat-message ${type}-message`;
-    
-    const p = document.createElement('p');
-    p.textContent = message;
-    messageDiv.appendChild(p);
-    
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-
-async function sendChatMessage() {
-    const chatInput = document.getElementById('chatInput');
-    const message = chatInput.value.trim();
-    
-    if (!message) {
-        return;
-    }
-    
-    addChatMessage(message, 'user');
-    chatInput.value = '';
-    
-    try {
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ message })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success && data.response) {
-            addChatMessage(data.response, 'system');
-        }
-    } catch (error) {
-        console.error('[UI] Error sending chat message:', error);
-        addChatMessage('Error sending message', 'system');
+        console.error('[TeleOps] Error toggling filter:', error);
     }
 }
 
 // ==================== Utility Functions ====================
 function escapeHtml(text) {
-    if (text === null || text === undefined) {
-        return '';
-    }
+    if (text === null || text === undefined) return '';
     const div = document.createElement('div');
     div.textContent = String(text);
     return div.innerHTML;
@@ -369,22 +369,19 @@ function escapeHtml(text) {
 
 // ==================== Auto-Update Loop ====================
 async function startAutoUpdate() {
-    // First, load config from server to get CAPTURE_INTERVAL
     await loadConfig();
     
-    console.log('[UI] Starting auto-update loops');
-    console.log(`[UI] Poll interval: ${state.captureInterval}ms (from CAPTURE_INTERVAL)`);
+    console.log(`[TeleOps] Starting with ${state.captureInterval}ms interval`);
     
-    // Initial updates
+    // Initial loads
     updateLatestFrame();
     loadFilters();
+    loadLogs();
     
-    // Start continuous polling using the CAPTURE_INTERVAL from server
+    // Start intervals
     state.frameUpdateInterval = setInterval(updateLatestFrame, state.captureInterval);
     state.filterUpdateInterval = setInterval(loadFilters, state.captureInterval);
-    
-    console.log('[UI] Auto-update loops started');
-    addChatMessage(`Polling every ${state.captureInterval / 1000} seconds (CAPTURE_INTERVAL from .env)`, 'system');
+    state.logUpdateInterval = setInterval(loadLogs, 1000); // Logs update every 1s
 }
 
 function stopAutoUpdate() {
@@ -396,50 +393,38 @@ function stopAutoUpdate() {
         clearInterval(state.filterUpdateInterval);
         state.filterUpdateInterval = null;
     }
-    console.log('[UI] Auto-update loops stopped');
+    if (state.logUpdateInterval) {
+        clearInterval(state.logUpdateInterval);
+        state.logUpdateInterval = null;
+    }
 }
 
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('[UI] DOM loaded, initializing application');
+    console.log('[TeleOps] Initializing...');
     
-    // Initialize theme
     initTheme();
     
-    // Set up event listeners
     document.getElementById('addFilterBtn').addEventListener('click', addFilter);
-    document.getElementById('sendChatBtn').addEventListener('click', sendChatMessage);
     
-    // Enter key to add filter
+    const clearLogBtn = document.getElementById('clearLogBtn');
+    if (clearLogBtn) {
+        clearLogBtn.addEventListener('click', clearLogs);
+    }
+    
     document.getElementById('newFilterPrompt').addEventListener('keydown', (e) => {
-        if (e.ctrlKey && e.key === 'Enter') {
-            addFilter();
-        }
+        if (e.ctrlKey && e.key === 'Enter') addFilter();
     });
     
-    // Enter key to send chat message
-    document.getElementById('chatInput').addEventListener('keydown', (e) => {
-        if (e.ctrlKey && e.key === 'Enter') {
-            sendChatMessage();
-        }
-    });
-    
-    // Start auto-update (this will load config first)
     startAutoUpdate();
     
-    // Welcome message
-    addChatMessage('System initialized. Camera feed monitoring started.', 'system');
-    
-    console.log('[UI] Initialization complete');
+    console.log('[TeleOps] Ready!');
 });
 
-// Handle page visibility changes - pause updates when hidden
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-        console.log('[UI] Page hidden, pausing updates');
         stopAutoUpdate();
     } else {
-        console.log('[UI] Page visible, resuming updates');
         startAutoUpdate();
     }
 });
