@@ -30,6 +30,11 @@
     --response-border: #0ea5e9;
     --response-text: #0369a1;
     
+    /* Evaluating status */
+    --evaluating-bg: #fef3c7;
+    --evaluating-border: #f59e0b;
+    --evaluating-text: #92400e;
+    
     /* Transitions */
     --transition-fast: 150ms ease;
     --transition-medium: 300ms ease;
@@ -50,6 +55,11 @@
     --response-bg: #0c4a6e;
     --response-border: #0284c7;
     --response-text: #7dd3fc;
+    
+    /* Evaluating status Dark */
+    --evaluating-bg: #451a03;
+    --evaluating-border: #d97706;
+    --evaluating-text: #fcd34d;
 }
 
 /* ==================== Global Styles ==================== */
@@ -334,6 +344,31 @@ body {
 .filter-response-box.result-false {
     background-color: rgba(239, 68, 68, 0.1);
     border-color: var(--status-false);
+}
+
+.filter-response-box.evaluating {
+    background-color: var(--evaluating-bg);
+    border-color: var(--evaluating-border);
+    animation: evaluatingPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes evaluatingPulse {
+    0%, 100% { 
+        opacity: 1;
+        border-color: var(--evaluating-border);
+    }
+    50% { 
+        opacity: 0.7;
+        border-color: var(--color-warning);
+    }
+}
+
+.filter-response-box.evaluating .response-label {
+    color: var(--evaluating-text);
+}
+
+.filter-response-box.evaluating .response-text {
+    color: var(--evaluating-text);
 }
 
 .response-label {

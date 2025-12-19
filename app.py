@@ -13,6 +13,7 @@ from flask_cors import CORS
 import threading
 import time
 from dotenv import load_dotenv
+import concurrent.futures
 
 from camera_capture import CameraCapture
 from openai_handler import OpenAIHandler
@@ -36,14 +37,19 @@ CORS(app)
 # Global state
 camera_capture = None
 openai_handler = None
-filters = []
-filter_results = {}
-latest_frame_path = None
+filter_manager = None
 
-# Evaluation interval in seconds
-EVALUATION_INTERVAL = 3.0
+# Get CAPTURE_INTERVAL from environment - this controls EVERYTHING:
+# - How often camera captures a frame
+# - How often GPT is called
+# - How often UI should poll
+CAPTURE_INTERVAL = float(os.environ.get("CAPTURE_INTERVAL", "3.0"))
 
-print(f"[APP] Evaluation interval set to: {EVALUATION_INTERVAL} seconds", flush=True)
+print(f"[APP] CAPTURE_INTERVAL set to: {CAPTURE_INTERVAL} seconds", flush=True)
+print(f"[APP] This interval controls: camera capture, GPT evaluation, and UI polling", flush=True)
+
+# Thread pool for non-blocking API calls
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 
 class FilterManager:
@@ -55,6 +61,7 @@ class FilterManager:
         self.results = {}
         self.openai_handler = openai_handler
         self.lock = threading.Lock()
+        self.pending_evaluations = {}  # Track which filters are being evaluated
         print(f"[FilterManager] OpenAI handler: {openai_handler}", flush=True)
         print("[FilterManager] INITIALIZED", flush=True)
     
@@ -70,7 +77,7 @@ class FilterManager:
                 "order": len(self.filters)
             }
             self.filters.append(new_filter)
-            self.results[filter_id] = {"response": None, "timestamp": None}
+            self.results[filter_id] = {"response": None, "timestamp": None, "status": "pending"}
             print(f"[FilterManager] Filter added: {filter_id}", flush=True)
             print(f"[FilterManager] Total filters: {len(self.filters)}", flush=True)
             return new_filter
@@ -82,6 +89,8 @@ class FilterManager:
             self.filters = [f for f in self.filters if f["id"] != filter_id]
             if filter_id in self.results:
                 del self.results[filter_id]
+            if filter_id in self.pending_evaluations:
+                del self.pending_evaluations[filter_id]
             self._reorder()
             print(f"[FilterManager] Filter removed. Total: {len(self.filters)}", flush=True)
     
@@ -112,18 +121,51 @@ class FilterManager:
         for i, f in enumerate(self.filters):
             f["order"] = i
     
-    def evaluate_filters(self, image_path, log_folder=None):
-        """Evaluate all active filters against the latest image"""
+    def _evaluate_single_filter(self, filter_obj, image_path, log_folder):
+        """Evaluate a single filter - runs in background thread"""
+        filter_id = filter_obj["id"]
+        print(f"[FilterManager] _evaluate_single_filter STARTED for {filter_id}", flush=True)
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Mark as evaluating
+        with self.lock:
+            self.results[filter_id] = {
+                "response": "Evaluating...",
+                "timestamp": current_time,
+                "status": "evaluating"
+            }
+        
+        # Make the API call (this is the slow part)
+        result = self.openai_handler.evaluate_image(
+            image_path, 
+            filter_obj["prompt"],
+            log_folder=log_folder,
+            filter_id=filter_id
+        )
+        
+        print(f"[FilterManager] _evaluate_single_filter COMPLETED for {filter_id}: {result}", flush=True)
+        
+        # Store result
+        with self.lock:
+            self.results[filter_id] = {
+                "response": result,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "completed"
+            }
+            if filter_id in self.pending_evaluations:
+                del self.pending_evaluations[filter_id]
+    
+    def evaluate_filters_async(self, image_path, log_folder=None):
+        """Evaluate all active filters ASYNCHRONOUSLY - does not block"""
         print("=" * 60, flush=True)
-        print(f"[FilterManager] evaluate_filters CALLED", flush=True)
+        print(f"[FilterManager] evaluate_filters_async CALLED", flush=True)
         print(f"[FilterManager] image_path: {image_path}", flush=True)
         print(f"[FilterManager] log_folder: {log_folder}", flush=True)
         
         if not image_path:
             print("[FilterManager] ERROR: image_path is None/empty", flush=True)
             return
-        
-        print(f"[FilterManager] os.path.exists(image_path): {os.path.exists(image_path)}", flush=True)
         
         if not os.path.exists(image_path):
             print(f"[FilterManager] ERROR: image file does not exist: {image_path}", flush=True)
@@ -133,39 +175,34 @@ class FilterManager:
             active_filters = [f for f in self.filters if f["is_active"]]
             print(f"[FilterManager] Total filters: {len(self.filters)}", flush=True)
             print(f"[FilterManager] Active filters: {len(active_filters)}", flush=True)
-            for f in active_filters:
-                print(f"[FilterManager]   - {f['id']}: {f['prompt'][:50]}...", flush=True)
         
         if len(active_filters) == 0:
             print("[FilterManager] No active filters to evaluate", flush=True)
             print("=" * 60, flush=True)
             return
         
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+        # Submit each filter evaluation to the thread pool (NON-BLOCKING)
         for filter_obj in active_filters:
-            print("-" * 40, flush=True)
-            print(f"[FilterManager] Evaluating filter: {filter_obj['id']}", flush=True)
-            print(f"[FilterManager] Prompt: {filter_obj['prompt']}", flush=True)
-            print(f"[FilterManager] Calling openai_handler.evaluate_image()...", flush=True)
+            filter_id = filter_obj["id"]
             
-            # NO TRY/EXCEPT - let errors propagate
-            result = self.openai_handler.evaluate_image(
-                image_path, 
-                filter_obj["prompt"],
-                log_folder=log_folder,
-                filter_id=filter_obj["id"]
-            )
-            
-            print(f"[FilterManager] RESULT RECEIVED: {result}", flush=True)
-            
+            # Skip if already being evaluated
             with self.lock:
-                self.results[filter_obj["id"]] = {
-                    "response": result,
-                    "timestamp": current_time
-                }
-                print(f"[FilterManager] Result stored for {filter_obj['id']}", flush=True)
+                if filter_id in self.pending_evaluations:
+                    print(f"[FilterManager] Filter {filter_id} already being evaluated, skipping", flush=True)
+                    continue
+                self.pending_evaluations[filter_id] = True
+            
+            print(f"[FilterManager] Submitting filter {filter_id} to thread pool", flush=True)
+            
+            # Submit to thread pool - this returns immediately
+            executor.submit(
+                self._evaluate_single_filter,
+                filter_obj,
+                image_path,
+                log_folder
+            )
         
+        print(f"[FilterManager] All filters submitted to thread pool (non-blocking)", flush=True)
         print("=" * 60, flush=True)
     
     def get_filters_with_results(self):
@@ -175,7 +212,8 @@ class FilterManager:
                 {
                     **f,
                     "result": self.results.get(f["id"], {}).get("response"),
-                    "timestamp": self.results.get(f["id"], {}).get("timestamp")
+                    "timestamp": self.results.get(f["id"], {}).get("timestamp"),
+                    "status": self.results.get(f["id"], {}).get("status", "pending")
                 }
                 for f in self.filters
             ]
@@ -199,15 +237,14 @@ def initialize_app():
     
     # Get camera configuration from environment or use defaults
     camera_url = os.environ.get("CAMERA_URL", "http://10.0.0.197:8080/cam_c")
-    capture_interval = float(os.environ.get("CAPTURE_INTERVAL", "1.0"))
     
     print(f"[initialize_app] CAMERA_URL: {camera_url}", flush=True)
-    print(f"[initialize_app] CAPTURE_INTERVAL: {capture_interval}", flush=True)
+    print(f"[initialize_app] CAPTURE_INTERVAL: {CAPTURE_INTERVAL} seconds (used for camera, GPT, and UI)", flush=True)
     
     print("[initialize_app] Creating CameraCapture...", flush=True)
     camera_capture = CameraCapture(
         camera_url=camera_url,
-        capture_interval=capture_interval
+        capture_interval=CAPTURE_INTERVAL  # Use the same interval
     )
     print(f"[initialize_app] CameraCapture created: {camera_capture}", flush=True)
     print(f"[initialize_app] CameraCapture base_folder: {camera_capture.base_folder}", flush=True)
@@ -226,21 +263,22 @@ def initialize_app():
     camera_capture.start()
     print("[initialize_app] Camera capture started", flush=True)
     
-    # Start filter evaluation loop (runs every 3 seconds)
+    # Start filter evaluation loop (runs every CAPTURE_INTERVAL seconds)
     print("[initialize_app] Starting filter evaluation loop thread...", flush=True)
     eval_thread = threading.Thread(target=filter_evaluation_loop, daemon=True)
     eval_thread.start()
     print(f"[initialize_app] Filter evaluation thread started: {eval_thread}", flush=True)
     
-    print(f"[initialize_app] Filter evaluation will run every {EVALUATION_INTERVAL} seconds", flush=True)
+    print(f"[initialize_app] Filter evaluation will run every {CAPTURE_INTERVAL} seconds", flush=True)
     print("=" * 80, flush=True)
 
 
 def filter_evaluation_loop():
-    """Background loop to evaluate filters on new frames every 3 seconds"""
+    """Background loop to trigger filter evaluations every CAPTURE_INTERVAL seconds"""
     global camera_capture, filter_manager
     
     print("[filter_evaluation_loop] THREAD STARTED", flush=True)
+    print(f"[filter_evaluation_loop] Will run every {CAPTURE_INTERVAL} seconds", flush=True)
     
     loop_count = 0
     
@@ -248,36 +286,26 @@ def filter_evaluation_loop():
         loop_count += 1
         print("", flush=True)
         print("*" * 60, flush=True)
-        print(f"[filter_evaluation_loop] LOOP #{loop_count}", flush=True)
-        print(f"[filter_evaluation_loop] Time: {datetime.now()}", flush=True)
-        
-        print(f"[filter_evaluation_loop] camera_capture: {camera_capture}", flush=True)
-        print(f"[filter_evaluation_loop] filter_manager: {filter_manager}", flush=True)
+        print(f"[filter_evaluation_loop] LOOP #{loop_count} at {datetime.now()}", flush=True)
         
         latest_frame = camera_capture.get_latest_frame()
         print(f"[filter_evaluation_loop] latest_frame: {latest_frame}", flush=True)
         
-        if latest_frame:
-            print(f"[filter_evaluation_loop] os.path.exists(latest_frame): {os.path.exists(latest_frame)}", flush=True)
-        
         if latest_frame and os.path.exists(latest_frame):
-            # Get the log folder from the camera capture's base folder
             log_folder = str(camera_capture.base_folder) if camera_capture.base_folder else None
-            
             print(f"[filter_evaluation_loop] log_folder: {log_folder}", flush=True)
-            print(f"[filter_evaluation_loop] Calling filter_manager.evaluate_filters()...", flush=True)
             
-            # NO TRY/EXCEPT - let errors propagate and crash if needed
-            filter_manager.evaluate_filters(latest_frame, log_folder=log_folder)
+            # This call is NON-BLOCKING - it submits to thread pool and returns immediately
+            filter_manager.evaluate_filters_async(latest_frame, log_folder=log_folder)
             
-            print(f"[filter_evaluation_loop] evaluate_filters() completed", flush=True)
+            print(f"[filter_evaluation_loop] Async evaluation triggered (non-blocking)", flush=True)
         else:
-            print(f"[filter_evaluation_loop] No valid frame available, skipping evaluation", flush=True)
+            print(f"[filter_evaluation_loop] No valid frame available", flush=True)
         
-        print(f"[filter_evaluation_loop] Sleeping for {EVALUATION_INTERVAL} seconds...", flush=True)
+        print(f"[filter_evaluation_loop] Sleeping for {CAPTURE_INTERVAL} seconds...", flush=True)
         print("*" * 60, flush=True)
         
-        time.sleep(EVALUATION_INTERVAL)
+        time.sleep(CAPTURE_INTERVAL)
 
 
 # Routes
@@ -288,22 +316,26 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/api/config')
+def get_config():
+    """Return the capture interval so the UI knows how often to poll"""
+    return jsonify({
+        "success": True,
+        "capture_interval": CAPTURE_INTERVAL
+    })
+
+
 @app.route('/api/latest-frame')
 def get_latest_frame():
     """Get the latest captured frame"""
-    print(f"[ROUTE /api/latest-frame] Called", flush=True)
-    
     if camera_capture:
         frame_path = camera_capture.get_latest_frame()
-        print(f"[ROUTE /api/latest-frame] frame_path: {frame_path}", flush=True)
         
         if frame_path and os.path.exists(frame_path):
             with open(frame_path, 'rb') as f:
                 img_data = base64.b64encode(f.read()).decode('utf-8')
             
             mod_time = os.path.getmtime(frame_path)
-            
-            print(f"[ROUTE /api/latest-frame] Success, image size: {len(img_data)} chars", flush=True)
             
             return jsonify({
                 "success": True,
@@ -312,10 +344,8 @@ def get_latest_frame():
                 "timestamp": mod_time
             })
         else:
-            print(f"[ROUTE /api/latest-frame] Frame not available", flush=True)
             return jsonify({"success": False, "error": f"Frame path invalid or missing: {frame_path}"})
     
-    print("[ROUTE /api/latest-frame] Camera capture not initialized", flush=True)
     return jsonify({"success": False, "error": "Camera capture not initialized"})
 
 
@@ -323,9 +353,6 @@ def get_latest_frame():
 def get_filters():
     """Get all filters with their results"""
     filters_data = filter_manager.get_filters_with_results()
-    print(f"[ROUTE /api/filters GET] Returning {len(filters_data)} filters", flush=True)
-    for f in filters_data:
-        print(f"[ROUTE /api/filters GET]   - {f['id']}: result={f.get('result')}", flush=True)
     return jsonify({
         "success": True,
         "filters": filters_data
@@ -392,4 +419,4 @@ if __name__ == '__main__':
     print("[MAIN] Starting Flask application...", flush=True)
     initialize_app()
     print("[MAIN] Running Flask server on 0.0.0.0:5000", flush=True)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

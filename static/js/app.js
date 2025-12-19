@@ -1,6 +1,9 @@
 /**
  * Main Application JavaScript
  * Handles UI interactions, theme toggling, and API communication
+ * 
+ * IMPORTANT: This script uses CAPTURE_INTERVAL from the server config
+ * to determine how often to poll for updates.
  */
 
 // ==================== State Management ====================
@@ -8,7 +11,11 @@ const state = {
     theme: localStorage.getItem('theme') || 'light',
     filters: [],
     latestFrame: null,
-    updateInterval: null
+    frameUpdateInterval: null,
+    filterUpdateInterval: null,
+    captureInterval: 3000,  // Default 3 seconds, will be updated from server
+    lastFrameTimestamp: null,
+    lastFiltersJSON: null
 };
 
 // ==================== Theme Management ====================
@@ -23,6 +30,25 @@ function initTheme() {
     });
 }
 
+// ==================== Config Loading ====================
+async function loadConfig() {
+    try {
+        console.log('[UI] Loading config from server...');
+        const response = await fetch('/api/config');
+        const data = await response.json();
+        
+        if (data.success && data.capture_interval) {
+            // Convert seconds to milliseconds
+            state.captureInterval = data.capture_interval * 1000;
+            console.log(`[UI] CAPTURE_INTERVAL from server: ${data.capture_interval} seconds (${state.captureInterval}ms)`);
+        }
+    } catch (error) {
+        console.error('[UI] Error loading config, using default:', error);
+    }
+    
+    return state.captureInterval;
+}
+
 // ==================== Frame Updates ====================
 async function updateLatestFrame() {
     try {
@@ -34,24 +60,23 @@ async function updateLatestFrame() {
             const framePlaceholder = document.querySelector('.frame-placeholder');
             const frameStatus = document.getElementById('frameStatus');
             
-            // Force image reload by adding timestamp to prevent caching
-            frameImg.src = data.image;
-            frameImg.classList.add('loaded');
-            framePlaceholder.style.display = 'none';
-            frameStatus.classList.add('active');
-            
-            state.latestFrame = data.path;
-            
-            // Debug: log frame updates
-            if (data.timestamp) {
+            // Only update if image has changed (check timestamp)
+            if (data.timestamp !== state.lastFrameTimestamp) {
+                frameImg.src = data.image;
+                frameImg.classList.add('loaded');
+                framePlaceholder.style.display = 'none';
+                frameStatus.classList.add('active');
+                
+                state.latestFrame = data.path;
+                state.lastFrameTimestamp = data.timestamp;
+                
+                // Update frame info display
                 const frameTime = new Date(data.timestamp * 1000);
-                console.log(`Frame updated: ${data.path} (${frameTime.toLocaleTimeString()})`);
+                console.log(`[UI] Frame updated: ${frameTime.toLocaleTimeString()}`);
             }
-        } else {
-            console.warn('No frame available:', data.error);
         }
     } catch (error) {
-        console.error('Error fetching latest frame:', error);
+        console.error('[UI] Error fetching latest frame:', error);
     }
 }
 
@@ -62,11 +87,17 @@ async function loadFilters() {
         const data = await response.json();
         
         if (data.success) {
-            state.filters = data.filters;
-            renderFilters();
+            // Check if filters have actually changed to avoid unnecessary re-renders
+            const newFiltersJSON = JSON.stringify(data.filters);
+            if (newFiltersJSON !== state.lastFiltersJSON) {
+                state.filters = data.filters;
+                state.lastFiltersJSON = newFiltersJSON;
+                renderFilters();
+                console.log(`[UI] Filters updated: ${data.filters.length} filters`);
+            }
         }
     } catch (error) {
-        console.error('Error loading filters:', error);
+        console.error('[UI] Error loading filters:', error);
     }
 }
 
@@ -92,10 +123,14 @@ function createFilterHTML(filter) {
     const activeClass = filter.is_active ? 'active' : '';
     
     // Determine result display and styling
-    let resultText = 'Waiting...';
+    let resultText = 'Waiting for evaluation...';
     let resultClass = '';
+    let statusClass = '';
     
-    if (filter.result !== null && filter.result !== undefined) {
+    if (filter.status === 'evaluating') {
+        resultText = 'Evaluating...';
+        statusClass = 'evaluating';
+    } else if (filter.result !== null && filter.result !== undefined) {
         resultText = filter.result;
         
         // Check if result indicates true/false for styling
@@ -124,7 +159,7 @@ function createFilterHTML(filter) {
             </div>
             
             <!-- GPT Response Box -->
-            <div class="filter-response-box ${resultClass}">
+            <div class="filter-response-box ${resultClass} ${statusClass}">
                 <div class="response-label">GPT Response:</div>
                 <div class="response-text">${escapeHtml(resultText)}</div>
                 ${timestampDisplay ? `<div class="response-timestamp">${escapeHtml(timestampDisplay)}</div>` : ''}
@@ -217,11 +252,12 @@ async function addFilter() {
         
         if (data.success) {
             promptInput.value = '';
+            state.lastFiltersJSON = null; // Force refresh
             await loadFilters();
             addChatMessage(`Filter added: "${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}"`, 'system');
         }
     } catch (error) {
-        console.error('Error adding filter:', error);
+        console.error('[UI] Error adding filter:', error);
         alert('Failed to add filter');
     }
 }
@@ -233,11 +269,12 @@ async function removeFilter(filterId) {
         });
         
         if (response.ok) {
+            state.lastFiltersJSON = null; // Force refresh
             await loadFilters();
             addChatMessage('Filter removed', 'system');
         }
     } catch (error) {
-        console.error('Error removing filter:', error);
+        console.error('[UI] Error removing filter:', error);
     }
 }
 
@@ -252,10 +289,11 @@ async function moveFilter(filterId, direction) {
         });
         
         if (response.ok) {
+            state.lastFiltersJSON = null; // Force refresh
             await loadFilters();
         }
     } catch (error) {
-        console.error('Error moving filter:', error);
+        console.error('[UI] Error moving filter:', error);
     }
 }
 
@@ -266,10 +304,11 @@ async function toggleFilter(filterId) {
         });
         
         if (response.ok) {
+            state.lastFiltersJSON = null; // Force refresh
             await loadFilters();
         }
     } catch (error) {
-        console.error('Error toggling filter:', error);
+        console.error('[UI] Error toggling filter:', error);
     }
 }
 
@@ -313,7 +352,7 @@ async function sendChatMessage() {
             addChatMessage(data.response, 'system');
         }
     } catch (error) {
-        console.error('Error sending chat message:', error);
+        console.error('[UI] Error sending chat message:', error);
         addChatMessage('Error sending message', 'system');
     }
 }
@@ -329,18 +368,41 @@ function escapeHtml(text) {
 }
 
 // ==================== Auto-Update Loop ====================
-function startAutoUpdate() {
-    // Update frame every 2 seconds
-    updateLatestFrame();
-    setInterval(updateLatestFrame, 2000);
+async function startAutoUpdate() {
+    // First, load config from server to get CAPTURE_INTERVAL
+    await loadConfig();
     
-    // Update filters every 3 seconds (matches backend evaluation interval)
+    console.log('[UI] Starting auto-update loops');
+    console.log(`[UI] Poll interval: ${state.captureInterval}ms (from CAPTURE_INTERVAL)`);
+    
+    // Initial updates
+    updateLatestFrame();
     loadFilters();
-    setInterval(loadFilters, 3000);
+    
+    // Start continuous polling using the CAPTURE_INTERVAL from server
+    state.frameUpdateInterval = setInterval(updateLatestFrame, state.captureInterval);
+    state.filterUpdateInterval = setInterval(loadFilters, state.captureInterval);
+    
+    console.log('[UI] Auto-update loops started');
+    addChatMessage(`Polling every ${state.captureInterval / 1000} seconds (CAPTURE_INTERVAL from .env)`, 'system');
+}
+
+function stopAutoUpdate() {
+    if (state.frameUpdateInterval) {
+        clearInterval(state.frameUpdateInterval);
+        state.frameUpdateInterval = null;
+    }
+    if (state.filterUpdateInterval) {
+        clearInterval(state.filterUpdateInterval);
+        state.filterUpdateInterval = null;
+    }
+    console.log('[UI] Auto-update loops stopped');
 }
 
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', () => {
+    console.log('[UI] DOM loaded, initializing application');
+    
     // Initialize theme
     initTheme();
     
@@ -362,9 +424,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     
-    // Start auto-update
+    // Start auto-update (this will load config first)
     startAutoUpdate();
     
     // Welcome message
-    addChatMessage('System initialized. Camera feed monitoring started. GPT-4o will evaluate filters every 3 seconds.', 'system');
+    addChatMessage('System initialized. Camera feed monitoring started.', 'system');
+    
+    console.log('[UI] Initialization complete');
+});
+
+// Handle page visibility changes - pause updates when hidden
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        console.log('[UI] Page hidden, pausing updates');
+        stopAutoUpdate();
+    } else {
+        console.log('[UI] Page visible, resuming updates');
+        startAutoUpdate();
+    }
 });
