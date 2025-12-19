@@ -52,36 +52,71 @@
 
         <!-- Main Content -->
         <main class="main-content">
-            <!-- Left Column: Camera Feed -->
-            <section class="panel camera-panel">
+            <!-- Left Column: Camera Feeds -->
+            <section class="panel cameras-panel">
                 <div class="panel-header">
                     <div class="panel-title">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
                             <circle cx="12" cy="13" r="4"></circle>
                         </svg>
-                        <h2>Live Feed</h2>
+                        <h2>Live Feeds</h2>
                     </div>
-                    <div class="panel-badge" id="frameStatus">
+                    <div class="panel-badge active" id="frameStatus">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                             <circle cx="12" cy="12" r="8"></circle>
                         </svg>
                         <span>Recording</span>
                     </div>
                 </div>
-                <div class="frame-container">
-                    <img id="latestFrame" src="" alt="Latest camera frame" />
-                    <div class="frame-placeholder">
-                        <div class="placeholder-icon">
-                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                <polyline points="21 15 16 10 5 21"></polyline>
-                            </svg>
+                
+                <div class="cameras-container">
+                    <!-- Camera A -->
+                    <div class="camera-feed" id="cameraA">
+                        <div class="camera-header">
+                            <span class="camera-label">Camera A</span>
+                            <span class="camera-status">
+                                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"></circle></svg>
+                            </span>
                         </div>
-                        <p>Connecting to camera...</p>
-                        <div class="loading-dots">
-                            <span></span><span></span><span></span>
+                        <div class="frame-container-small">
+                            <img id="frameA" src="" alt="Camera A" />
+                            <div class="frame-placeholder-small">
+                                <div class="loading-dots"><span></span><span></span><span></span></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Camera B -->
+                    <div class="camera-feed" id="cameraB">
+                        <div class="camera-header">
+                            <span class="camera-label">Camera B</span>
+                            <span class="camera-status">
+                                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"></circle></svg>
+                            </span>
+                        </div>
+                        <div class="frame-container-small">
+                            <img id="frameB" src="" alt="Camera B" />
+                            <div class="frame-placeholder-small">
+                                <div class="loading-dots"><span></span><span></span><span></span></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Camera C (Primary - used for AI analysis) -->
+                    <div class="camera-feed primary" id="cameraC">
+                        <div class="camera-header">
+                            <span class="camera-label">Camera C</span>
+                            <span class="camera-badge">AI Analysis</span>
+                            <span class="camera-status">
+                                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"></circle></svg>
+                            </span>
+                        </div>
+                        <div class="frame-container-small">
+                            <img id="frameC" src="" alt="Camera C" />
+                            <div class="frame-placeholder-small">
+                                <div class="loading-dots"><span></span><span></span><span></span></div>
+                            </div>
                         </div>
                     </div>
                 </div>

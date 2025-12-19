@@ -1,6 +1,6 @@
 /**
  * TeleOps - AI Vision Monitor
- * Real-time camera feed with AI filter evaluation
+ * Real-time camera feeds with AI filter evaluation
  */
 
 // ==================== State Management ====================
@@ -8,12 +8,15 @@ const state = {
     theme: localStorage.getItem('theme') || 'dark',
     filters: [],
     logs: [],
-    latestFrame: null,
+    cameras: {
+        A: { lastTimestamp: null },
+        B: { lastTimestamp: null },
+        C: { lastTimestamp: null }
+    },
     frameUpdateInterval: null,
     filterUpdateInterval: null,
     logUpdateInterval: null,
     captureInterval: 3000,
-    lastFrameTimestamp: null,
     lastFiltersJSON: null,
     lastLogsLength: 0
 };
@@ -52,29 +55,35 @@ async function loadConfig() {
 }
 
 // ==================== Frame Updates ====================
-async function updateLatestFrame() {
+async function updateCameraFrame(cameraId) {
     try {
-        const response = await fetch('/api/latest-frame');
+        const response = await fetch(`/api/latest-frame/${cameraId}`);
         const data = await response.json();
         
         if (data.success && data.image) {
-            const frameImg = document.getElementById('latestFrame');
-            const framePlaceholder = document.querySelector('.frame-placeholder');
-            const frameStatus = document.getElementById('frameStatus');
+            const frameImg = document.getElementById(`frame${cameraId}`);
+            const placeholder = frameImg?.parentElement?.querySelector('.frame-placeholder-small');
             
-            if (data.timestamp !== state.lastFrameTimestamp) {
+            if (frameImg && data.timestamp !== state.cameras[cameraId].lastTimestamp) {
                 frameImg.src = data.image;
                 frameImg.classList.add('loaded');
-                if (framePlaceholder) framePlaceholder.style.display = 'none';
-                if (frameStatus) frameStatus.classList.add('active');
+                if (placeholder) placeholder.style.display = 'none';
                 
-                state.latestFrame = data.path;
-                state.lastFrameTimestamp = data.timestamp;
+                state.cameras[cameraId].lastTimestamp = data.timestamp;
             }
         }
     } catch (error) {
-        console.error('[TeleOps] Error fetching frame:', error);
+        console.error(`[TeleOps] Error fetching Camera ${cameraId}:`, error);
     }
+}
+
+async function updateAllCameras() {
+    // Update all three cameras in parallel
+    await Promise.all([
+        updateCameraFrame('A'),
+        updateCameraFrame('B'),
+        updateCameraFrame('C')
+    ]);
 }
 
 // ==================== Log Management ====================
@@ -84,7 +93,6 @@ async function loadLogs() {
         const data = await response.json();
         
         if (data.success && data.logs) {
-            // Only update if new logs exist
             if (data.logs.length !== state.lastLogsLength) {
                 state.logs = data.logs;
                 state.lastLogsLength = data.logs.length;
@@ -108,12 +116,8 @@ function renderLogs() {
         return;
     }
     
-    // Show newest first
     const reversedLogs = [...state.logs].reverse();
-    
     logContainer.innerHTML = reversedLogs.map(log => createLogEntryHTML(log)).join('');
-    
-    // Auto-scroll to top (newest)
     logContainer.scrollTop = 0;
 }
 
@@ -374,14 +378,14 @@ async function startAutoUpdate() {
     console.log(`[TeleOps] Starting with ${state.captureInterval}ms interval`);
     
     // Initial loads
-    updateLatestFrame();
+    updateAllCameras();
     loadFilters();
     loadLogs();
     
     // Start intervals
-    state.frameUpdateInterval = setInterval(updateLatestFrame, state.captureInterval);
+    state.frameUpdateInterval = setInterval(updateAllCameras, state.captureInterval);
     state.filterUpdateInterval = setInterval(loadFilters, state.captureInterval);
-    state.logUpdateInterval = setInterval(loadLogs, 1000); // Logs update every 1s
+    state.logUpdateInterval = setInterval(loadLogs, 1000);
 }
 
 function stopAutoUpdate() {

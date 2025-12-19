@@ -99,18 +99,22 @@ class BufferlessVideoCapture:
 class CameraCapture:
     """Handles capturing frames from a camera feed"""
     
-    def __init__(self, camera_url, capture_interval=1.0):
+    def __init__(self, camera_url, capture_interval=1.0, camera_id=""):
         """
         Initialize camera capture
         
         Args:
             camera_url: URL of the camera feed (supports snapshots and MJPEG streams)
             capture_interval: Time between captures in seconds
+            camera_id: Identifier for this camera (e.g., "A", "B", "C")
         """
+        self.camera_id = camera_id
+        prefix = f"[Camera {camera_id}]" if camera_id else "[CameraCapture]"
+        
         print("=" * 60, flush=True)
-        print("[CameraCapture] INITIALIZING", flush=True)
-        print(f"[CameraCapture] camera_url: {camera_url}", flush=True)
-        print(f"[CameraCapture] capture_interval: {capture_interval}", flush=True)
+        print(f"{prefix} INITIALIZING", flush=True)
+        print(f"{prefix} camera_url: {camera_url}", flush=True)
+        print(f"{prefix} capture_interval: {capture_interval}", flush=True)
         
         self.camera_url = camera_url
         self.capture_interval = capture_interval
@@ -121,21 +125,25 @@ class CameraCapture:
         self.lock = threading.Lock()
         self.use_opencv = False  # Whether to use OpenCV for video streams
         self.video_capture = None  # BufferlessVideoCapture object
+        self.log_prefix = prefix
         
         # Create base storage folder
         self._create_storage_folder()
         
-        print(f"[CameraCapture] base_folder: {self.base_folder}", flush=True)
-        print("[CameraCapture] INITIALIZED", flush=True)
+        print(f"{prefix} base_folder: {self.base_folder}", flush=True)
+        print(f"{prefix} INITIALIZED", flush=True)
         print("=" * 60, flush=True)
     
     def _create_storage_folder(self):
         """Create the storage folder with timestamp"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.base_folder = Path(f"exp_time_{timestamp}")
+        if self.camera_id:
+            self.base_folder = Path(f"exp_cam{self.camera_id}_{timestamp}")
+        else:
+            self.base_folder = Path(f"exp_time_{timestamp}")
         self.base_folder.mkdir(exist_ok=True)
-        print(f"[CameraCapture] Created storage folder: {self.base_folder}", flush=True)
-        print(f"[CameraCapture] Absolute path: {self.base_folder.absolute()}", flush=True)
+        print(f"{self.log_prefix} Created storage folder: {self.base_folder}", flush=True)
+        print(f"{self.log_prefix} Absolute path: {self.base_folder.absolute()}", flush=True)
     
     def start(self):
         """Start capturing frames in a background thread"""

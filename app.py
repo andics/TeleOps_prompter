@@ -36,7 +36,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Global state
-camera_capture = None
+camera_captures = {}  # Dictionary to hold all camera captures
 openai_handler = None
 filter_manager = None
 
@@ -50,7 +50,16 @@ PROMPT_SUFFIX = ' Answer only using "True" if the answer is "Yes" and "False" if
 # Get CAPTURE_INTERVAL from environment
 CAPTURE_INTERVAL = float(os.environ.get("CAPTURE_INTERVAL", "3.0"))
 
+# Camera URLs
+CAMERA_BASE_URL = os.environ.get("CAMERA_BASE_URL", "http://10.0.0.197:8080")
+CAMERA_URLS = {
+    "A": f"{CAMERA_BASE_URL}/cam_a",
+    "B": f"{CAMERA_BASE_URL}/cam_b",
+    "C": f"{CAMERA_BASE_URL}/cam_c",  # Primary camera for AI analysis
+}
+
 print(f"[APP] CAPTURE_INTERVAL set to: {CAPTURE_INTERVAL} seconds", flush=True)
+print(f"[APP] Camera URLs: {CAMERA_URLS}", flush=True)
 
 # Thread pool for non-blocking API calls
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
@@ -65,13 +74,11 @@ def extract_first_sentence(text):
     text = text.strip()
     
     # Find the first sentence-ending punctuation
-    # We look for . ? or ! followed by a space or end of string
     match = re.search(r'^(.*?[.?!])(?:\s|$)', text)
     
     if match:
         return match.group(1).strip()
     else:
-        # No sentence-ending punctuation found, return the whole text
         return text
 
 
@@ -88,7 +95,6 @@ def add_log(message, log_type="info"):
         if len(activity_log) > 100:
             activity_log.pop(0)
     
-    # Also print to console with color coding
     type_colors = {
         "info": "[INFO]",
         "success": "[SUCCESS]",
@@ -122,7 +128,7 @@ class FilterManager:
             filter_id = f"filter_{int(time.time() * 1000)}"
             new_filter = {
                 "id": filter_id,
-                "prompt": prompt,  # Store FULL prompt (both sentences for display)
+                "prompt": prompt,
                 "is_active": is_active,
                 "order": len(self.filters)
             }
@@ -173,12 +179,9 @@ class FilterManager:
     def _evaluate_single_filter(self, filter_obj, image_path, log_folder):
         """Evaluate a single filter - runs in background thread"""
         filter_id = filter_obj["id"]
-        full_prompt = filter_obj["prompt"]  # Full prompt (both sentences)
+        full_prompt = filter_obj["prompt"]
         
-        # Extract only the FIRST sentence for VLM
         first_sentence = extract_first_sentence(full_prompt)
-        
-        # Create the prompt to send to VLM: first sentence + suffix
         vlm_prompt = first_sentence + PROMPT_SUFFIX
         
         print(f"[FilterManager] Evaluating filter {filter_id}", flush=True)
@@ -190,7 +193,6 @@ class FilterManager:
         
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Mark as evaluating
         with self.lock:
             self.results[filter_id] = {
                 "response": "Evaluating...",
@@ -198,23 +200,20 @@ class FilterManager:
                 "status": "evaluating"
             }
         
-        # Make the API call with VLM prompt (first sentence + suffix only)
         result = self.openai_handler.evaluate_image(
             image_path, 
-            vlm_prompt,  # Send only first sentence + suffix
+            vlm_prompt,
             log_folder=log_folder,
             filter_id=filter_id
         )
         
         print(f"[FilterManager] Result for {filter_id}: {result}", flush=True)
         
-        # Log the result
         if result:
             add_log(f"VLM response: {result}", "success")
         else:
             add_log(f"VLM returned no response", "error")
         
-        # Store result
         with self.lock:
             self.results[filter_id] = {
                 "response": result,
@@ -235,7 +234,7 @@ class FilterManager:
         if len(active_filters) == 0:
             return
         
-        add_log(f"Evaluating {len(active_filters)} filter(s) on new frame", "camera")
+        add_log(f"Evaluating {len(active_filters)} filter(s) on Camera C", "camera")
         
         for filter_obj in active_filters:
             filter_id = filter_obj["id"]
@@ -267,8 +266,8 @@ class FilterManager:
 
 
 def initialize_app():
-    """Initialize camera capture and OpenAI handler"""
-    global camera_capture, openai_handler, filter_manager
+    """Initialize camera captures and OpenAI handler"""
+    global camera_captures, openai_handler, filter_manager
     
     add_log("TeleOps initializing...", "info")
     
@@ -278,21 +277,24 @@ def initialize_app():
     else:
         add_log("OpenAI API key NOT SET!", "error")
     
-    camera_url = os.environ.get("CAMERA_URL", "http://10.0.0.197:8080/cam_c")
+    # Initialize all three cameras
+    for cam_id, cam_url in CAMERA_URLS.items():
+        add_log(f"Camera {cam_id}: {cam_url}", "camera")
+        camera_captures[cam_id] = CameraCapture(
+            camera_url=cam_url,
+            capture_interval=CAPTURE_INTERVAL,
+            camera_id=cam_id
+        )
     
-    add_log(f"Camera URL: {camera_url}", "camera")
     add_log(f"Capture interval: {CAPTURE_INTERVAL}s", "info")
-    
-    camera_capture = CameraCapture(
-        camera_url=camera_url,
-        capture_interval=CAPTURE_INTERVAL
-    )
     
     openai_handler = OpenAIHandler(api_key=api_key)
     filter_manager = FilterManager(openai_handler)
     
-    camera_capture.start()
-    add_log("Camera capture started", "camera")
+    # Start all camera captures
+    for cam_id, capture in camera_captures.items():
+        capture.start()
+        add_log(f"Camera {cam_id} capture started", "camera")
     
     eval_thread = threading.Thread(target=filter_evaluation_loop, daemon=True)
     eval_thread.start()
@@ -301,15 +303,18 @@ def initialize_app():
 
 
 def filter_evaluation_loop():
-    """Background loop to trigger filter evaluations"""
-    global camera_capture, filter_manager
+    """Background loop to trigger filter evaluations using Camera C only"""
+    global camera_captures, filter_manager
     
     while True:
-        latest_frame = camera_capture.get_latest_frame()
-        
-        if latest_frame and os.path.exists(latest_frame):
-            log_folder = str(camera_capture.base_folder) if camera_capture.base_folder else None
-            filter_manager.evaluate_filters_async(latest_frame, log_folder=log_folder)
+        # Only use Camera C for AI analysis
+        camera_c = camera_captures.get("C")
+        if camera_c:
+            latest_frame = camera_c.get_latest_frame()
+            
+            if latest_frame and os.path.exists(latest_frame):
+                log_folder = str(camera_c.base_folder) if camera_c.base_folder else None
+                filter_manager.evaluate_filters_async(latest_frame, log_folder=log_folder)
         
         time.sleep(CAPTURE_INTERVAL)
 
@@ -330,28 +335,32 @@ def get_config():
     })
 
 
-@app.route('/api/latest-frame')
-def get_latest_frame():
-    """Get the latest captured frame"""
-    if camera_capture:
-        frame_path = camera_capture.get_latest_frame()
-        
-        if frame_path and os.path.exists(frame_path):
-            with open(frame_path, 'rb') as f:
-                img_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            mod_time = os.path.getmtime(frame_path)
-            
-            return jsonify({
-                "success": True,
-                "image": f"data:image/jpeg;base64,{img_data}",
-                "path": frame_path,
-                "timestamp": mod_time
-            })
-        else:
-            return jsonify({"success": False, "error": f"Frame not available"})
+@app.route('/api/latest-frame/<camera_id>')
+def get_latest_frame(camera_id):
+    """Get the latest captured frame for a specific camera"""
+    camera_id = camera_id.upper()
     
-    return jsonify({"success": False, "error": "Camera not initialized"})
+    if camera_id not in camera_captures:
+        return jsonify({"success": False, "error": f"Unknown camera: {camera_id}"})
+    
+    capture = camera_captures[camera_id]
+    frame_path = capture.get_latest_frame()
+    
+    if frame_path and os.path.exists(frame_path):
+        with open(frame_path, 'rb') as f:
+            img_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        mod_time = os.path.getmtime(frame_path)
+        
+        return jsonify({
+            "success": True,
+            "image": f"data:image/jpeg;base64,{img_data}",
+            "path": frame_path,
+            "timestamp": mod_time,
+            "camera": camera_id
+        })
+    else:
+        return jsonify({"success": False, "error": f"Frame not available for Camera {camera_id}"})
 
 
 @app.route('/api/filters', methods=['GET'])
@@ -407,6 +416,34 @@ def get_logs():
             "success": True,
             "logs": list(activity_log)
         })
+
+
+@app.route('/api/status')
+def get_status():
+    """Get combined status of all filters - True only if ALL active filters are False"""
+    filters_with_results = filter_manager.get_filters_with_results()
+    
+    # If no filters exist, return False
+    if not filters_with_results:
+        return jsonify({"result": False, "reason": "No filters configured"})
+    
+    # Check only active filters
+    active_filters = [f for f in filters_with_results if f.get('is_active', True)]
+    
+    if not active_filters:
+        return jsonify({"result": False, "reason": "No active filters"})
+    
+    # Check if all active filters have "False" response
+    all_false = True
+    for f in active_filters:
+        response = f.get('result', {}).get('response')
+        if response is None:
+            return jsonify({"result": False, "reason": f"Filter '{f.get('prompt', '')[:30]}...' not yet evaluated"})
+        if response.strip().lower() != "false":
+            all_false = False
+            break
+    
+    return jsonify({"result": all_false})
 
 
 @app.route('/api/chat', methods=['POST'])
