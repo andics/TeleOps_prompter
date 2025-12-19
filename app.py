@@ -4,458 +4,465 @@ Main Flask Application for TeleOps - Camera Feed Monitor with AI Vision Filters
 import os
 import sys
 import base64
-import json
 import re
-import traceback
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request, send_from_directory
+from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import threading
 import time
 from dotenv import load_dotenv
 import concurrent.futures
 
-from camera_capture import CameraCapture
-from openai_handler import OpenAIHandler
-
 # Force unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-print("=" * 80, flush=True)
-print("[APP] Starting TeleOps Camera Feed Monitor", flush=True)
-print(f"[APP] Current time: {datetime.now()}", flush=True)
-print(f"[APP] Working directory: {os.getcwd()}", flush=True)
-print("=" * 80, flush=True)
+# Create shared folder for ALL images and logs
+SHARED_FOLDER = Path(f"teleops_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+SHARED_FOLDER.mkdir(exist_ok=True)
+LOG_FILE = open(SHARED_FOLDER / "teleops.log", "a", encoding="utf-8", buffering=1)
+
+# Activity log for UI (initialized early so add_log works)
+activity_log = []
+activity_log_lock = threading.Lock()
+
+
+def log(msg):
+    """Log to console AND file only (not UI)"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    LOG_FILE.write(line + "\n")
+    LOG_FILE.flush()
+
+
+def add_log(message, log_type="info"):
+    """Add to UI activity log AND console/file"""
+    with activity_log_lock:
+        ts = datetime.now().strftime("%H:%M:%S")
+        activity_log.append({"message": message, "type": log_type, "timestamp": ts})
+        if len(activity_log) > 100:
+            activity_log.pop(0)
+    log(f"[{log_type.upper()}] {message}")
+
+
+add_log("=== TeleOps Starting ===", "info")
+add_log(f"Log folder: {SHARED_FOLDER.absolute()}", "info")
+
+# Now import modules
+from camera_capture import CameraCapture
+from openai_handler import OpenAIHandler
 
 app = Flask(__name__)
 CORS(app)
 
-# Global state
-camera_captures = {}  # Dictionary to hold all camera captures
-openai_handler = None
-filter_manager = None
-
-# Activity log for the UI
-activity_log = []
-activity_log_lock = threading.Lock()
-
-# Prompt suffix to append to the FIRST SENTENCE of all filter prompts
-PROMPT_SUFFIX = ' Answer only using "True" if the answer is "Yes" and "False" if the answer is "No".'
-
-# Get CAPTURE_INTERVAL from environment
+# Config from env 
 CAPTURE_INTERVAL = float(os.environ.get("CAPTURE_INTERVAL", "3.0"))
-
-# Camera URLs
+FILTER_INTERVAL = float(os.environ.get("FILTER_INTERVAL", "5.0"))
 CAMERA_BASE_URL = os.environ.get("CAMERA_BASE_URL", "http://10.0.0.197:8080")
+
 CAMERA_URLS = {
     "A": f"{CAMERA_BASE_URL}/cam_a",
     "B": f"{CAMERA_BASE_URL}/cam_b",
-    "C": f"{CAMERA_BASE_URL}/cam_c",  # Primary camera for AI analysis
+    "C": f"{CAMERA_BASE_URL}/cam_c",
 }
 
-print(f"[APP] CAPTURE_INTERVAL set to: {CAPTURE_INTERVAL} seconds", flush=True)
-print(f"[APP] Camera URLs: {CAMERA_URLS}", flush=True)
+add_log(f"Capture interval: {CAPTURE_INTERVAL}s", "info")
+add_log(f"Filter interval: {FILTER_INTERVAL}s", "info")
+add_log(f"Camera base URL: {CAMERA_BASE_URL}", "info")
 
-# Thread pool for non-blocking API calls
+# Global state
+camera_captures = {}
+openai_handler = None
+filter_manager = None
+camera_enabled = {"A": True, "B": True, "C": True}
+camera_order = ["A", "B", "C"]
+vlm_camera = "C"
+camera_state_lock = threading.Lock()
+
+# Thread pool
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+
+PROMPT_SUFFIX = ' Answer only using "True" if the answer is "No" and "False" if the answer is "Yes".'
 
 
 def extract_first_sentence(text):
-    """
-    Extract the first sentence from a prompt.
-    A sentence ends with . or ? or !
-    Returns the first sentence (including the punctuation).
-    """
     text = text.strip()
-    
-    # Find the first sentence-ending punctuation
     match = re.search(r'^(.*?[.?!])(?:\s|$)', text)
-    
-    if match:
-        return match.group(1).strip()
-    else:
-        return text
-
-
-def add_log(message, log_type="info"):
-    """Add a message to the activity log"""
-    with activity_log_lock:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        activity_log.append({
-            "message": message,
-            "type": log_type,
-            "timestamp": timestamp
-        })
-        # Keep only last 100 messages
-        if len(activity_log) > 100:
-            activity_log.pop(0)
-    
-    type_colors = {
-        "info": "[INFO]",
-        "success": "[SUCCESS]",
-        "error": "[ERROR]",
-        "warning": "[WARNING]",
-        "vlm": "[VLM]",
-        "camera": "[CAMERA]",
-        "filter": "[FILTER]"
-    }
-    prefix = type_colors.get(log_type, "[LOG]")
-    print(f"{prefix} {timestamp} - {message}", flush=True)
+    return match.group(1).strip() if match else text
 
 
 class FilterManager:
-    """Manages filters and their evaluation"""
-    
-    def __init__(self, openai_handler):
-        print("[FilterManager] INITIALIZING", flush=True)
+    def __init__(self, vlm_handler):
         self.filters = []
         self.results = {}
-        self.openai_handler = openai_handler
+        self.vlm_handler = vlm_handler
         self.lock = threading.Lock()
-        self.pending_evaluations = {}
-        print(f"[FilterManager] OpenAI handler: {openai_handler}", flush=True)
-        print("[FilterManager] INITIALIZED", flush=True)
+        self.pending = {}
+        add_log("Filter Manager initialized", "success")
     
     def add_filter(self, prompt, is_active=True):
-        """Add a new filter"""
-        print(f"[FilterManager] add_filter called with prompt: {prompt}", flush=True)
         with self.lock:
-            filter_id = f"filter_{int(time.time() * 1000)}"
-            new_filter = {
-                "id": filter_id,
-                "prompt": prompt,
-                "is_active": is_active,
-                "order": len(self.filters)
-            }
-            self.filters.append(new_filter)
-            self.results[filter_id] = {"response": None, "timestamp": None, "status": "pending"}
-            print(f"[FilterManager] Filter added: {filter_id}", flush=True)
-            add_log(f"Filter added: {prompt[:50]}{'...' if len(prompt) > 50 else ''}", "filter")
-            return new_filter
+            fid = f"filter_{int(time.time() * 1000)}"
+            f = {"id": fid, "prompt": prompt, "is_active": is_active, "order": len(self.filters)}
+            self.filters.append(f)
+            self.results[fid] = {"response": None, "timestamp": None, "status": "pending"}
+            add_log(f"Filter added: '{prompt[:50]}{'...' if len(prompt) > 50 else ''}'", "filter")
+            return f
     
-    def remove_filter(self, filter_id):
-        """Remove a filter by ID"""
-        print(f"[FilterManager] remove_filter called: {filter_id}", flush=True)
+    def remove_filter(self, fid):
         with self.lock:
-            self.filters = [f for f in self.filters if f["id"] != filter_id]
-            if filter_id in self.results:
-                del self.results[filter_id]
-            if filter_id in self.pending_evaluations:
-                del self.pending_evaluations[filter_id]
+            for f in self.filters:
+                if f["id"] == fid:
+                    add_log(f"Filter removed: '{f['prompt'][:30]}...'", "filter")
+                    break
+            self.filters = [f for f in self.filters if f["id"] != fid]
+            self.results.pop(fid, None)
+            self.pending.pop(fid, None)
             self._reorder()
-            add_log(f"Filter removed: {filter_id}", "filter")
     
-    def move_filter(self, filter_id, direction):
-        """Move filter up (-1) or down (1)"""
+    def move_filter(self, fid, direction):
         with self.lock:
             for i, f in enumerate(self.filters):
-                if f["id"] == filter_id:
-                    new_index = i + direction
-                    if 0 <= new_index < len(self.filters):
-                        self.filters[i], self.filters[new_index] = self.filters[new_index], self.filters[i]
+                if f["id"] == fid:
+                    new_i = i + direction
+                    if 0 <= new_i < len(self.filters):
+                        self.filters[i], self.filters[new_i] = self.filters[new_i], self.filters[i]
+                        add_log(f"Filter moved {'up' if direction < 0 else 'down'}", "filter")
                     break
             self._reorder()
     
-    def toggle_filter(self, filter_id):
-        """Toggle filter active state"""
+    def toggle_filter(self, fid):
         with self.lock:
             for f in self.filters:
-                if f["id"] == filter_id:
+                if f["id"] == fid:
                     f["is_active"] = not f["is_active"]
                     status = "enabled" if f["is_active"] else "disabled"
-                    add_log(f"Filter {status}: {f['prompt'][:30]}...", "filter")
+                    add_log(f"Filter {status}: '{f['prompt'][:30]}...'", "filter")
                     break
     
     def _reorder(self):
-        """Update order values"""
         for i, f in enumerate(self.filters):
             f["order"] = i
     
-    def _evaluate_single_filter(self, filter_obj, image_path, log_folder):
-        """Evaluate a single filter - runs in background thread"""
-        filter_id = filter_obj["id"]
-        full_prompt = filter_obj["prompt"]
-        
+    def _evaluate_single(self, fobj, img_path):
+        fid = fobj["id"]
+        full_prompt = fobj["prompt"]
         first_sentence = extract_first_sentence(full_prompt)
         vlm_prompt = first_sentence + PROMPT_SUFFIX
         
-        print(f"[FilterManager] Evaluating filter {filter_id}", flush=True)
-        print(f"[FilterManager] Full prompt (display): {full_prompt}", flush=True)
-        print(f"[FilterManager] First sentence extracted: {first_sentence}", flush=True)
-        print(f"[FilterManager] VLM prompt being sent: {vlm_prompt}", flush=True)
-        
-        add_log(f"Sending to VLM: {vlm_prompt}", "vlm")
-        
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        add_log(f"Sending to VLM: '{first_sentence[:40]}...'", "vlm")
+        log(f"[VLM] Full VLM prompt: {vlm_prompt}")
+        log(f"[VLM] Image path: {img_path}")
         
         with self.lock:
-            self.results[filter_id] = {
-                "response": "Evaluating...",
-                "timestamp": current_time,
-                "status": "evaluating"
-            }
+            self.results[fid] = {"response": "Evaluating...", "timestamp": datetime.now().strftime("%H:%M:%S"), "status": "evaluating"}
         
-        result = self.openai_handler.evaluate_image(
-            image_path, 
-            vlm_prompt,
-            log_folder=log_folder,
-            filter_id=filter_id
-        )
-        
-        print(f"[FilterManager] Result for {filter_id}: {result}", flush=True)
-        
-        if result:
-            add_log(f"VLM response: {result}", "success")
-        else:
-            add_log(f"VLM returned no response", "error")
-        
-        with self.lock:
-            self.results[filter_id] = {
-                "response": result,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "status": "completed"
-            }
-            if filter_id in self.pending_evaluations:
-                del self.pending_evaluations[filter_id]
-    
-    def evaluate_filters_async(self, image_path, log_folder=None):
-        """Evaluate all active filters ASYNCHRONOUSLY"""
-        if not image_path or not os.path.exists(image_path):
-            return
-        
-        with self.lock:
-            active_filters = [f for f in self.filters if f["is_active"]]
-        
-        if len(active_filters) == 0:
-            return
-        
-        add_log(f"Evaluating {len(active_filters)} filter(s) on Camera C", "camera")
-        
-        for filter_obj in active_filters:
-            filter_id = filter_obj["id"]
+        try:
+            result = self.vlm_handler.evaluate_image(img_path, vlm_prompt, str(SHARED_FOLDER), fid)
+            
+            add_log(f"VLM Response: '{result}'", "success")
+            log(f"[VLM] Raw result for {fid}: {result}")
+            log(f"[VLM] Result type: {type(result)}")
             
             with self.lock:
-                if filter_id in self.pending_evaluations:
+                self.results[fid] = {"response": result, "timestamp": datetime.now().strftime("%H:%M:%S"), "status": "completed"}
+                self.pending.pop(fid, None)
+                
+        except Exception as e:
+            add_log(f"VLM Error: {str(e)}", "error")
+            log(f"[VLM] Exception: {e}")
+            with self.lock:
+                self.results[fid] = {"response": f"Error: {e}", "timestamp": datetime.now().strftime("%H:%M:%S"), "status": "error"}
+                self.pending.pop(fid, None)
+    
+    def evaluate_async(self, img_path):
+        if not img_path or not os.path.exists(img_path):
+            log(f"[VLM] Skipping evaluation - no valid image path")
+            return
+        
+        with self.lock:
+            active = [f for f in self.filters if f["is_active"]]
+        
+        if not active:
+            return
+        
+        log(f"[VLM] Starting evaluation of {len(active)} active filter(s)")
+        add_log(f"Evaluating {len(active)} filter(s) on image...", "vlm")
+        
+        for f in active:
+            fid = f["id"]
+            with self.lock:
+                if fid in self.pending:
+                    log(f"[VLM] Filter {fid} already pending, skipping")
                     continue
-                self.pending_evaluations[filter_id] = True
-            
-            executor.submit(
-                self._evaluate_single_filter,
-                filter_obj,
-                image_path,
-                log_folder
-            )
+                self.pending[fid] = True
+            executor.submit(self._evaluate_single, f, img_path)
     
     def get_filters_with_results(self):
-        """Get all filters with their current results"""
         with self.lock:
-            return [
-                {
-                    **f,
-                    "result": self.results.get(f["id"], {}).get("response"),
-                    "timestamp": self.results.get(f["id"], {}).get("timestamp"),
-                    "status": self.results.get(f["id"], {}).get("status", "pending")
-                }
-                for f in self.filters
-            ]
+            return [{
+                **f,
+                "result": self.results.get(f["id"], {}).get("response"),
+                "timestamp": self.results.get(f["id"], {}).get("timestamp"),
+                "status": self.results.get(f["id"], {}).get("status", "pending")
+            } for f in self.filters]
 
 
 def initialize_app():
-    """Initialize camera captures and OpenAI handler"""
     global camera_captures, openai_handler, filter_manager
     
-    add_log("TeleOps initializing...", "info")
+    add_log("Initializing system...", "info")
     
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
-        add_log("OpenAI API key loaded", "success")
+        add_log(f"VLM API key found: {api_key[:8]}...{api_key[-4:]}", "success")
     else:
-        add_log("OpenAI API key NOT SET!", "error")
+        add_log("WARNING: VLM API key NOT SET!", "error")
     
-    # Initialize all three cameras
-    for cam_id, cam_url in CAMERA_URLS.items():
-        add_log(f"Camera {cam_id}: {cam_url}", "camera")
-        camera_captures[cam_id] = CameraCapture(
-            camera_url=cam_url,
-            capture_interval=CAPTURE_INTERVAL,
-            camera_id=cam_id
-        )
+    # Init cameras with shared folder
+    for cam_id, url in CAMERA_URLS.items():
+        add_log(f"Initializing Camera {cam_id}: {url}", "camera")
+        camera_captures[cam_id] = CameraCapture(url, CAPTURE_INTERVAL, cam_id, str(SHARED_FOLDER))
     
-    add_log(f"Capture interval: {CAPTURE_INTERVAL}s", "info")
-    
-    openai_handler = OpenAIHandler(api_key=api_key)
+    openai_handler = OpenAIHandler(api_key)
     filter_manager = FilterManager(openai_handler)
     
-    # Start all camera captures
-    for cam_id, capture in camera_captures.items():
-        capture.start()
+    # Start cameras
+    for cam_id, cap in camera_captures.items():
+        cap.start()
         add_log(f"Camera {cam_id} capture started", "camera")
     
-    eval_thread = threading.Thread(target=filter_evaluation_loop, daemon=True)
-    eval_thread.start()
+    # Start filter loop
+    threading.Thread(target=filter_loop, daemon=True).start()
+    add_log("Filter evaluation loop started", "success")
     
-    add_log("TeleOps ready!", "success")
+    add_log(f"VLM active on Camera {vlm_camera}", "vlm")
+    add_log("=== TeleOps Ready! ===", "success")
 
 
-def filter_evaluation_loop():
-    """Background loop to trigger filter evaluations using Camera C only"""
-    global camera_captures, filter_manager
+def filter_loop():
+    global vlm_camera
+    loop_count = 0
     
     while True:
-        # Only use Camera C for AI analysis
-        camera_c = camera_captures.get("C")
-        if camera_c:
-            latest_frame = camera_c.get_latest_frame()
-            
-            if latest_frame and os.path.exists(latest_frame):
-                log_folder = str(camera_c.base_folder) if camera_c.base_folder else None
-                filter_manager.evaluate_filters_async(latest_frame, log_folder=log_folder)
+        loop_count += 1
         
-        time.sleep(CAPTURE_INTERVAL)
+        with camera_state_lock:
+            cam_id = vlm_camera
+        
+        cam = camera_captures.get(cam_id)
+        if cam:
+            frame = cam.get_latest_frame()
+            if frame and os.path.exists(frame):
+                log(f"[LOOP #{loop_count}] Processing frame from Camera {cam_id}: {os.path.basename(frame)}")
+                filter_manager.evaluate_async(frame)
+            else:
+                log(f"[LOOP #{loop_count}] No frame available from Camera {cam_id}")
+        
+        time.sleep(FILTER_INTERVAL)
 
 
-# Routes
+# === ROUTES ===
+
 @app.route('/')
 def index():
-    """Serve the main page"""
     return render_template('index.html')
 
 
 @app.route('/api/config')
 def get_config():
-    """Return the capture interval"""
-    return jsonify({
-        "success": True,
-        "capture_interval": CAPTURE_INTERVAL
-    })
-
-
-@app.route('/api/latest-frame/<camera_id>')
-def get_latest_frame(camera_id):
-    """Get the latest captured frame for a specific camera"""
-    camera_id = camera_id.upper()
-    
-    if camera_id not in camera_captures:
-        return jsonify({"success": False, "error": f"Unknown camera: {camera_id}"})
-    
-    capture = camera_captures[camera_id]
-    frame_path = capture.get_latest_frame()
-    
-    if frame_path and os.path.exists(frame_path):
-        with open(frame_path, 'rb') as f:
-            img_data = base64.b64encode(f.read()).decode('utf-8')
-        
-        mod_time = os.path.getmtime(frame_path)
-        
+    with camera_state_lock:
         return jsonify({
             "success": True,
-            "image": f"data:image/jpeg;base64,{img_data}",
-            "path": frame_path,
-            "timestamp": mod_time,
-            "camera": camera_id
+            "capture_interval": CAPTURE_INTERVAL,
+            "filter_interval": FILTER_INTERVAL,
+            "cameras_enabled": dict(camera_enabled),
+            "cameras_order": list(camera_order),
+            "vlm_camera": vlm_camera
         })
-    else:
-        return jsonify({"success": False, "error": f"Frame not available for Camera {camera_id}"})
+
+
+@app.route('/api/camera/<cam_id>/toggle', methods=['POST'])
+def toggle_camera(cam_id):
+    cam_id = cam_id.upper()
+    if cam_id not in CAMERA_URLS:
+        return jsonify({"success": False, "error": "Unknown camera"})
+    with camera_state_lock:
+        camera_enabled[cam_id] = not camera_enabled[cam_id]
+        status = "enabled" if camera_enabled[cam_id] else "disabled"
+        add_log(f"Camera {cam_id} {status}", "camera")
+        return jsonify({"success": True, "enabled": camera_enabled[cam_id]})
+
+
+@app.route('/api/camera/<cam_id>/move', methods=['POST'])
+def move_camera(cam_id):
+    global camera_order
+    cam_id = cam_id.upper()
+    direction = request.json.get('direction', 0)
+    with camera_state_lock:
+        if cam_id in camera_order:
+            idx = camera_order.index(cam_id)
+            new_idx = idx + direction
+            if 0 <= new_idx < len(camera_order):
+                camera_order[idx], camera_order[new_idx] = camera_order[new_idx], camera_order[idx]
+                add_log(f"Camera {cam_id} moved {'up' if direction < 0 else 'down'}", "camera")
+        return jsonify({"success": True, "order": list(camera_order)})
+
+
+@app.route('/api/vlm-camera', methods=['POST'])
+def set_vlm_camera():
+    global vlm_camera
+    new_cam = request.json.get('camera', '').upper()
+    if new_cam not in CAMERA_URLS:
+        return jsonify({"success": False, "error": "Unknown camera"})
+    with camera_state_lock:
+        old_cam = vlm_camera
+        vlm_camera = new_cam
+    add_log(f"VLM switched from Camera {old_cam} to Camera {new_cam}", "vlm")
+    return jsonify({"success": True, "vlm_camera": new_cam})
+
+
+@app.route('/api/latest-frame/<cam_id>')
+def get_latest_frame(cam_id):
+    cam_id = cam_id.upper()
+    if cam_id not in camera_captures:
+        return jsonify({"success": False, "error": "Unknown camera"})
+    
+    with camera_state_lock:
+        if not camera_enabled.get(cam_id, True):
+            return jsonify({"success": False, "disabled": True})
+    
+    cap = camera_captures[cam_id]
+    frame = cap.get_latest_frame()
+    
+    if frame and os.path.exists(frame):
+        with open(frame, 'rb') as f:
+            img = base64.b64encode(f.read()).decode('utf-8')
+        return jsonify({
+            "success": True,
+            "image": f"data:image/jpeg;base64,{img}",
+            "path": frame,
+            "timestamp": os.path.getmtime(frame)
+        })
+    return jsonify({"success": False, "error": "No frame"})
 
 
 @app.route('/api/filters', methods=['GET'])
 def get_filters():
-    """Get all filters with their results"""
-    return jsonify({
-        "success": True,
-        "filters": filter_manager.get_filters_with_results()
-    })
+    return jsonify({"success": True, "filters": filter_manager.get_filters_with_results()})
 
 
 @app.route('/api/filters', methods=['POST'])
-def add_filter():
-    """Add a new filter"""
-    data = request.json
-    prompt = data.get('prompt', '')
-    
+def add_filter_route():
+    prompt = request.json.get('prompt', '')
     if not prompt:
-        return jsonify({"success": False, "error": "Prompt is required"}), 400
-    
-    new_filter = filter_manager.add_filter(prompt, is_active=True)
-    return jsonify({"success": True, "filter": new_filter})
+        return jsonify({"success": False, "error": "Prompt required"}), 400
+    f = filter_manager.add_filter(prompt)
+    return jsonify({"success": True, "filter": f})
 
 
-@app.route('/api/filters/<filter_id>', methods=['DELETE'])
-def delete_filter(filter_id):
-    """Remove a filter"""
-    filter_manager.remove_filter(filter_id)
+@app.route('/api/filters/<fid>', methods=['DELETE'])
+def delete_filter(fid):
+    filter_manager.remove_filter(fid)
     return jsonify({"success": True})
 
 
-@app.route('/api/filters/<filter_id>/move', methods=['POST'])
-def move_filter(filter_id):
-    """Move filter up or down"""
-    data = request.json
-    direction = data.get('direction', 0)
-    filter_manager.move_filter(filter_id, direction)
+@app.route('/api/filters/<fid>/move', methods=['POST'])
+def move_filter(fid):
+    direction = request.json.get('direction', 0)
+    filter_manager.move_filter(fid, direction)
     return jsonify({"success": True})
 
 
-@app.route('/api/filters/<filter_id>/toggle', methods=['POST'])
-def toggle_filter(filter_id):
-    """Toggle filter active state"""
-    filter_manager.toggle_filter(filter_id)
+@app.route('/api/filters/<fid>/toggle', methods=['POST'])
+def toggle_filter(fid):
+    filter_manager.toggle_filter(fid)
     return jsonify({"success": True})
 
 
 @app.route('/api/logs')
 def get_logs():
-    """Get activity logs"""
     with activity_log_lock:
-        return jsonify({
-            "success": True,
-            "logs": list(activity_log)
-        })
+        return jsonify({"success": True, "logs": list(activity_log)})
 
 
 @app.route('/api/status')
 def get_status():
-    """Get combined status of all filters - True only if ALL active filters are False"""
-    filters_with_results = filter_manager.get_filters_with_results()
+    """
+    Returns True ONLY if ALL active filters have VLM response containing "false".
+    Returns False otherwise.
+    """
+    filters = filter_manager.get_filters_with_results()
+    active = [f for f in filters if f.get('is_active') == True]
     
-    # If no filters exist, return False
-    if not filters_with_results:
-        return jsonify({"result": False, "reason": "No filters configured"})
+    log(f"")
+    log(f"{'='*60}")
+    log(f"[STATUS] API Status Check")
+    log(f"[STATUS] Total filters: {len(filters)}, Active: {len(active)}")
     
-    # Check only active filters
-    active_filters = [f for f in filters_with_results if f.get('is_active', True)]
+    add_log(f"Status check: {len(active)} active filter(s)", "info")
     
-    if not active_filters:
+    if not active:
+        log("[STATUS] No active filters -> returning FALSE")
+        add_log("Status: No active filters", "warning")
         return jsonify({"result": False, "reason": "No active filters"})
     
-    # Check if all active filters have "False" response
-    all_false = True
-    for f in active_filters:
-        response = f.get('result', {}).get('response')
-        if response is None:
-            return jsonify({"result": False, "reason": f"Filter '{f.get('prompt', '')[:30]}...' not yet evaluated"})
-        if response.strip().lower() != "false":
-            all_false = False
-            break
+    all_contain_false = True
     
-    return jsonify({"result": all_false})
+    for i, f in enumerate(active):
+        resp = f.get('result')
+        prompt_preview = f.get('prompt', '')[:30]
+        
+        log(f"[STATUS] Filter #{i+1}: '{prompt_preview}...'")
+        log(f"[STATUS]   Response: '{resp}'")
+        log(f"[STATUS]   Type: {type(resp)}")
+        
+        if resp is None:
+            log(f"[STATUS]   -> NONE (not evaluated) -> FALSE")
+            add_log(f"Status: Filter not yet evaluated", "warning")
+            return jsonify({"result": False, "reason": "Filter not evaluated"})
+        
+        if resp == "Evaluating...":
+            log(f"[STATUS]   -> Still evaluating -> FALSE")
+            add_log(f"Status: Filter still evaluating", "warning")
+            return jsonify({"result": False, "reason": "Filter evaluating"})
+        
+        resp_lower = str(resp).lower()
+        has_false = "false" in resp_lower
+        has_true = "true" in resp_lower
+        
+        log(f"[STATUS]   Lowercase: '{resp_lower}'")
+        log(f"[STATUS]   Contains 'false': {has_false}")
+        log(f"[STATUS]   Contains 'true': {has_true}")
+        
+        if has_false:
+            log(f"[STATUS]   -> PASS (contains 'false')")
+        else:
+            log(f"[STATUS]   -> FAIL (does NOT contain 'false')")
+            all_contain_false = False
+    
+    log(f"[STATUS] Final: all_contain_false = {all_contain_false}")
+    
+    if all_contain_false:
+        log(f"[STATUS] RETURNING: TRUE")
+        add_log("Status API: TRUE (all filters show 'False')", "success")
+        return jsonify({"result": True})
+    else:
+        log(f"[STATUS] RETURNING: FALSE")
+        add_log("Status API: FALSE (some filters don't show 'False')", "warning")
+        return jsonify({"result": False})
 
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Handle chat messages"""
-    data = request.json
-    message = data.get('message', '')
-    add_log(f"User: {message}", "info")
-    return jsonify({
-        "success": True,
-        "response": "Message logged"
-    })
+    msg = request.json.get('message', '')
+    add_log(f"User message: {msg}", "info")
+    return jsonify({"success": True})
 
 
 if __name__ == '__main__':

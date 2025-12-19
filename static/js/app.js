@@ -9,14 +9,17 @@ const state = {
     filters: [],
     logs: [],
     cameras: {
-        A: { lastTimestamp: null },
-        B: { lastTimestamp: null },
-        C: { lastTimestamp: null }
+        A: { lastTimestamp: null, enabled: true },
+        B: { lastTimestamp: null, enabled: true },
+        C: { lastTimestamp: null, enabled: true }
     },
+    cameraOrder: ['A', 'B', 'C'],
+    vlmCamera: 'C',
     frameUpdateInterval: null,
     filterUpdateInterval: null,
     logUpdateInterval: null,
     captureInterval: 3000,
+    filterInterval: 5000,
     lastFiltersJSON: null,
     lastLogsLength: 0
 };
@@ -39,12 +42,39 @@ async function loadConfig() {
         const response = await fetch('/api/config');
         const data = await response.json();
         
-        if (data.success && data.capture_interval) {
-            state.captureInterval = data.capture_interval * 1000;
+        if (data.success) {
+            if (data.capture_interval) {
+                state.captureInterval = data.capture_interval * 1000;
+            }
+            if (data.filter_interval) {
+                state.filterInterval = data.filter_interval * 1000;
+            }
+            
+            // Load camera enabled states
+            if (data.cameras_enabled) {
+                for (const [camId, enabled] of Object.entries(data.cameras_enabled)) {
+                    if (state.cameras[camId]) {
+                        state.cameras[camId].enabled = enabled;
+                        updateCameraToggleUI(camId, enabled);
+                    }
+                }
+            }
+            
+            // Load camera order
+            if (data.cameras_order) {
+                state.cameraOrder = data.cameras_order;
+                reorderCamerasInDOM(data.cameras_order);
+            }
+            
+            // Load VLM camera selection
+            if (data.vlm_camera) {
+                state.vlmCamera = data.vlm_camera;
+                updateVlmCameraUI(data.vlm_camera);
+            }
             
             const updateInfo = document.getElementById('updateInfo');
             if (updateInfo) {
-                updateInfo.textContent = `Updating every ${data.capture_interval}s`;
+                updateInfo.textContent = `Frame: ${data.capture_interval}s | Filter: ${data.filter_interval}s`;
             }
         }
     } catch (error) {
@@ -56,6 +86,11 @@ async function loadConfig() {
 
 // ==================== Frame Updates ====================
 async function updateCameraFrame(cameraId) {
+    // Skip if camera is disabled
+    if (!state.cameras[cameraId]?.enabled) {
+        return;
+    }
+    
     try {
         const response = await fetch(`/api/latest-frame/${cameraId}`);
         const data = await response.json();
@@ -63,14 +98,20 @@ async function updateCameraFrame(cameraId) {
         if (data.success && data.image) {
             const frameImg = document.getElementById(`frame${cameraId}`);
             const placeholder = frameImg?.parentElement?.querySelector('.frame-placeholder-small');
+            const overlay = frameImg?.parentElement?.querySelector('.camera-disabled-overlay');
             
             if (frameImg && data.timestamp !== state.cameras[cameraId].lastTimestamp) {
                 frameImg.src = data.image;
                 frameImg.classList.add('loaded');
                 if (placeholder) placeholder.style.display = 'none';
+                if (overlay) overlay.style.display = 'none';
                 
                 state.cameras[cameraId].lastTimestamp = data.timestamp;
             }
+        } else if (data.disabled) {
+            // Camera is disabled on server side
+            state.cameras[cameraId].enabled = false;
+            updateCameraToggleUI(cameraId, false);
         }
     } catch (error) {
         console.error(`[TeleOps] Error fetching Camera ${cameraId}:`, error);
@@ -84,6 +125,170 @@ async function updateAllCameras() {
         updateCameraFrame('B'),
         updateCameraFrame('C')
     ]);
+}
+
+// ==================== Camera Toggle ====================
+function updateCameraToggleUI(cameraId, enabled) {
+    const toggleBtn = document.querySelector(`.camera-toggle[data-camera="${cameraId}"]`);
+    const cameraFeed = document.getElementById(`camera${cameraId}`);
+    const overlay = cameraFeed?.querySelector('.camera-disabled-overlay');
+    const frameImg = document.getElementById(`frame${cameraId}`);
+    
+    if (toggleBtn) {
+        toggleBtn.classList.toggle('active', enabled);
+    }
+    
+    if (cameraFeed) {
+        cameraFeed.classList.toggle('disabled', !enabled);
+    }
+    
+    if (overlay) {
+        overlay.style.display = enabled ? 'none' : 'flex';
+    }
+    
+    if (frameImg && !enabled) {
+        frameImg.classList.remove('loaded');
+    }
+    
+    state.cameras[cameraId].enabled = enabled;
+}
+
+async function toggleCamera(cameraId) {
+    try {
+        const response = await fetch(`/api/camera/${cameraId}/toggle`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            updateCameraToggleUI(cameraId, data.enabled);
+        }
+    } catch (error) {
+        console.error(`[TeleOps] Error toggling Camera ${cameraId}:`, error);
+    }
+}
+
+function initCameraToggles() {
+    document.querySelectorAll('.camera-toggle').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const cameraId = btn.dataset.camera;
+            toggleCamera(cameraId);
+        });
+    });
+}
+
+// ==================== Camera Reordering ====================
+async function moveCamera(cameraId, direction) {
+    try {
+        const response = await fetch(`/api/camera/${cameraId}/move`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ direction })
+        });
+        const data = await response.json();
+        
+        if (data.success && data.order) {
+            state.cameraOrder = data.order;
+            reorderCamerasInDOM(data.order);
+        }
+    } catch (error) {
+        console.error(`[TeleOps] Error moving Camera ${cameraId}:`, error);
+    }
+}
+
+function reorderCamerasInDOM(order) {
+    const container = document.getElementById('camerasContainer');
+    if (!container) return;
+    
+    // Get all camera elements
+    const cameras = {};
+    order.forEach(camId => {
+        const el = document.getElementById(`camera${camId}`);
+        if (el) cameras[camId] = el;
+    });
+    
+    // Reorder by appending in correct order
+    order.forEach(camId => {
+        if (cameras[camId]) {
+            container.appendChild(cameras[camId]);
+        }
+    });
+}
+
+function initCameraMoveButtons() {
+    document.querySelectorAll('.camera-move-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const cameraId = btn.dataset.camera;
+            const direction = parseInt(btn.dataset.direction, 10);
+            moveCamera(cameraId, direction);
+        });
+    });
+}
+
+// ==================== VLM Camera Selection ====================
+function updateVlmCameraUI(selectedCamera) {
+    // Update checkboxes
+    document.querySelectorAll('.vlm-select').forEach(checkbox => {
+        checkbox.checked = (checkbox.value === selectedCamera);
+    });
+    
+    // Update camera feed styling
+    document.querySelectorAll('.camera-feed').forEach(feed => {
+        const camId = feed.dataset.cameraId;
+        feed.classList.toggle('vlm-active', camId === selectedCamera);
+        
+        // Update or add/remove VLM badge
+        const badge = feed.querySelector('.camera-badge');
+        if (camId === selectedCamera) {
+            if (!badge) {
+                const label = feed.querySelector('.camera-label');
+                if (label) {
+                    const newBadge = document.createElement('span');
+                    newBadge.className = 'camera-badge';
+                    newBadge.textContent = 'VLM';
+                    label.after(newBadge);
+                }
+            }
+        } else {
+            if (badge) {
+                badge.remove();
+            }
+        }
+    });
+    
+    state.vlmCamera = selectedCamera;
+}
+
+async function setVlmCamera(cameraId) {
+    try {
+        const response = await fetch('/api/vlm-camera', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ camera: cameraId })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            updateVlmCameraUI(data.vlm_camera);
+        }
+    } catch (error) {
+        console.error(`[TeleOps] Error setting VLM camera:`, error);
+    }
+}
+
+function initVlmCameraSelection() {
+    document.querySelectorAll('.vlm-select').forEach(checkbox => {
+        checkbox.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                setVlmCamera(e.target.value);
+            } else {
+                // Prevent unchecking - at least one must be selected
+                e.target.checked = true;
+            }
+        });
+    });
 }
 
 // ==================== Log Management ====================
@@ -375,16 +580,16 @@ function escapeHtml(text) {
 async function startAutoUpdate() {
     await loadConfig();
     
-    console.log(`[TeleOps] Starting with ${state.captureInterval}ms interval`);
+    console.log(`[TeleOps] Starting with capture: ${state.captureInterval}ms, filter: ${state.filterInterval}ms`);
     
     // Initial loads
     updateAllCameras();
     loadFilters();
     loadLogs();
     
-    // Start intervals
+    // Start intervals - frame updates use CAPTURE_INTERVAL, filter updates use FILTER_INTERVAL
     state.frameUpdateInterval = setInterval(updateAllCameras, state.captureInterval);
-    state.filterUpdateInterval = setInterval(loadFilters, state.captureInterval);
+    state.filterUpdateInterval = setInterval(loadFilters, state.filterInterval);
     state.logUpdateInterval = setInterval(loadLogs, 1000);
 }
 
@@ -408,6 +613,9 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('[TeleOps] Initializing...');
     
     initTheme();
+    initCameraToggles();
+    initCameraMoveButtons();
+    initVlmCameraSelection();
     
     document.getElementById('addFilterBtn').addEventListener('click', addFilter);
     
